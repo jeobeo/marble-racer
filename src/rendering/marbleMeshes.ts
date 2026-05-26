@@ -2,99 +2,109 @@ import {
   CanvasTexture,
   Color,
   Group,
+  LinearFilter,
   Mesh,
   MeshPhysicalMaterial,
+  RepeatWrapping,
   SphereGeometry,
-  Sprite,
-  SpriteMaterial,
   Texture,
 } from "three";
-import type { PickerOption } from "../simulation/types";
+import type { PickerOption, RaceBall } from "../simulation/types";
 import { createStartLayout } from "../shared/marbleLayout";
+
+type MarbleRenderable = PickerOption | RaceBall;
 
 export type MarbleMesh = {
   id: string;
   group: Group;
   sphere: Mesh;
-  label: Sprite;
 };
 
-export function createMarbleMeshes(options: PickerOption[]): Map<string, MarbleMesh> {
+export function createMarbleMeshes(options: MarbleRenderable[], maxAnisotropy = 1): Map<string, MarbleMesh> {
   const marbles = new Map<string, MarbleMesh>();
   const { radius } = createStartLayout(options.length);
-  const geometry = new SphereGeometry(radius, 48, 32);
+  const geometry = new SphereGeometry(radius, 64, 40);
 
   for (const option of options) {
-    const color = new Color(option.color ?? "#ff4f5e");
+    const color = new Color(option.color ?? "#8d96a3");
     const material = new MeshPhysicalMaterial({
-      color,
-      roughness: 0.22,
-      metalness: 0.05,
-      clearcoat: 0.8,
-      clearcoatRoughness: 0.16,
+      color: 0xffffff,
+      map: stripeTexture(color, maxAnisotropy),
+      roughness: 0.2,
+      metalness: 0.03,
+      clearcoat: 0.86,
+      clearcoatRoughness: 0.12,
     });
+
     const sphere = new Mesh(geometry, material);
     sphere.castShadow = true;
     sphere.receiveShadow = true;
 
-    const label = createLabel(option.label, color.getStyle());
-    label.position.set(0, radius + 0.38, 0);
-    label.scale.set(Math.max(0.8, radius * 4.25), Math.max(0.22, radius * 1.12), 1);
-
     const group = new Group();
-    group.add(sphere, label);
-    marbles.set(option.id, { id: option.id, group, sphere, label });
+    group.add(sphere);
+
+    marbles.set(option.id, {
+      id: option.id,
+      group,
+      sphere,
+    });
   }
 
   return marbles;
 }
 
-function createLabel(text: string, color: string): Sprite {
-  const texture = labelTexture(text, color);
-  return new Sprite(new SpriteMaterial({ map: texture, transparent: true, depthTest: false }));
-}
-
-function labelTexture(text: string, color: string): Texture {
+function stripeTexture(color: Color, maxAnisotropy: number): Texture {
   const canvas = document.createElement("canvas");
   canvas.width = 512;
-  canvas.height = 128;
+  canvas.height = 256;
+
   const context = canvas.getContext("2d");
 
   if (!context) {
     return new Texture();
   }
 
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.fillStyle = "rgba(12, 17, 23, 0.78)";
-  roundRect(context, 16, 20, 480, 88, 22);
+  const base = color.clone();
+  const dark = color.clone().offsetHSL(0, -0.08, -0.24);
+  const light = color.clone().offsetHSL(0, -0.04, 0.16);
+
+  context.fillStyle = base.getStyle();
+  context.fillRect(0, 0, canvas.width, canvas.height);
+
+  context.lineWidth = 38;
+  context.strokeStyle = dark.getStyle();
+
+  for (let x = -canvas.height; x < canvas.width + canvas.height; x += 116) {
+    context.beginPath();
+    context.moveTo(x, 0);
+    context.lineTo(x + canvas.height, canvas.height);
+    context.stroke();
+  }
+
+  context.lineWidth = 13;
+  context.strokeStyle = light.getStyle();
+
+  for (let x = -canvas.height; x < canvas.width + canvas.height; x += 116) {
+    context.beginPath();
+    context.moveTo(x + 40, 0);
+    context.lineTo(x + canvas.height + 40, canvas.height);
+    context.stroke();
+  }
+
+  context.fillStyle = "rgba(255, 255, 255, 0.18)";
+  context.beginPath();
+  context.arc(canvas.width * 0.25, canvas.height * 0.32, 42, 0, Math.PI * 2);
   context.fill();
-  context.strokeStyle = color;
-  context.lineWidth = 8;
-  context.stroke();
-  context.fillStyle = "#f8fbff";
-  context.font = "700 42px Arial";
-  context.textAlign = "center";
-  context.textBaseline = "middle";
-  context.fillText(text.slice(0, 18), canvas.width / 2, canvas.height / 2 + 3, 440);
 
   const texture = new CanvasTexture(canvas);
+  texture.wrapS = RepeatWrapping;
+  texture.wrapT = RepeatWrapping;
+  texture.repeat.set(1.45, 1.05);
+  texture.generateMipmaps = true;
+  texture.minFilter = LinearFilter;
+  texture.magFilter = LinearFilter;
+  texture.anisotropy = maxAnisotropy;
   texture.needsUpdate = true;
-  return texture;
-}
 
-function roundRect(
-  context: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-  radius: number,
-): void {
-  context.beginPath();
-  context.moveTo(x + radius, y);
-  context.arcTo(x + width, y, x + width, y + height, radius);
-  context.arcTo(x + width, y + height, x, y + height, radius);
-  context.arcTo(x, y + height, x, y, radius);
-  context.arcTo(x, y, x + width, y, radius);
-  context.closePath();
+  return texture;
 }

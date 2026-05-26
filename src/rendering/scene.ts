@@ -17,7 +17,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneBundle {
   const scene = new Scene();
   scene.background = null;
 
-  const camera = new PerspectiveCamera(48, 1, 0.1, 140);
+  const camera = new PerspectiveCamera(48, 1, 0.1, 2000);
   camera.position.set(0, 9, -11);
   camera.lookAt(0, 1.8, 12);
 
@@ -43,7 +43,11 @@ export function createScene(canvas: HTMLCanvasElement): SceneBundle {
 }
 
 export function resizeScene(bundle: SceneBundle, width: number, height: number): void {
-  bundle.camera.aspect = width / Math.max(height, 1);
+  const renderWidth = Math.max(1, Math.floor(width));
+  const renderHeight = Math.max(1, Math.floor(height));
+
+  bundle.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
+  bundle.camera.aspect = renderWidth / renderHeight;
   bundle.camera.updateProjectionMatrix();
-  bundle.renderer.setSize(width, height, false);
+  bundle.renderer.setSize(renderWidth, renderHeight, false);
 }
