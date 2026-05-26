@@ -21,10 +21,8 @@ const MUSIC_TRACKS = [
   "/music/Night%20Rockus.wav",
   "/music/No%20shortcut%20.wav",
   "/music/Panama.wav",
-  "/music/Podium.wav",
   "/music/Racing%20Sample%20TRACK.wav",
   "/music/Trigger.wav",
-  "/audio/marble.mp3",
 ];
 const SESSION_STORAGE_KEY = "marble-race-picker:current";
 const SAVED_SETUPS_STORAGE_KEY = "marble-race-picker:saved-setups";
