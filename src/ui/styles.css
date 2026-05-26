@@ -73,7 +73,7 @@ select {
   position: relative;
   border-right: 1px solid rgba(255, 255, 255, 0.09);
   background: rgba(13, 18, 24, 0.88);
-  padding: 22px;
+  padding: 20px 18px;
   overflow-y: auto;
   max-height: 100vh;
 }
@@ -162,30 +162,96 @@ small {
 }
 
 .option-row {
-  display: grid;
-  grid-template-columns: 38px minmax(86px, 1fr) 96px 58px 38px;
-  gap: 7px;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 5px;
   align-items: center;
+  width: 100%;
+  min-width: 0;
 }
 
 .color-input {
-  padding: 3px;
+  flex: 0 0 32px;
+  width: 32px;
+  min-height: 32px;
+  height: 32px;
+  padding: 2px;
+}
+
+.label-input {
+  flex: 1 1 72px;
+  width: auto;
+  min-height: 34px;
+  padding-inline: 8px;
+}
+
+.count-stepper {
+  flex: 0 0 92px;
+  display: grid;
+  grid-template-columns: 26px minmax(38px, 1fr) 26px;
+  align-items: stretch;
+  min-width: 0;
+  width: 92px;
+  height: 34px;
+  border: 1px solid #3a4d5f;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #151e27;
+}
+
+.count-button {
+  min-height: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: #1f2d39;
+  color: #dce8f2;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.count-button:hover:not(:disabled) {
+  background: #2d4050;
 }
 
 .weight-input {
-  text-align: right;
+  min-height: 0;
+  height: 100%;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 0;
+  text-align: center;
+  background: #111923;
+  font-weight: 750;
+}
+
+.weight-input::-webkit-outer-spin-button,
+.weight-input::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+.weight-input[type="number"] {
+  appearance: textfield;
 }
 
 .odds {
+  flex: 0 0 44px;
   color: #dbe5ef;
-  font-size: 13px;
+  font-size: 12px;
   text-align: right;
+  white-space: nowrap;
 }
 
 .icon-button {
-  width: 38px;
+  flex: 0 0 34px;
+  width: 34px;
+  min-height: 34px;
   padding: 0;
-  font-size: 20px;
+  font-size: 18px;
+  line-height: 1;
 }
 
 .icon-text {

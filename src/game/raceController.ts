@@ -27,6 +27,8 @@ const MUSIC_TRACKS = [
 const SESSION_STORAGE_KEY = "marble-race-picker:current";
 const SAVED_SETUPS_STORAGE_KEY = "marble-race-picker:saved-setups";
 const STANDINGS_UPDATE_SECONDS = 0.2;
+const SESSION_SAVE_DEBOUNCE_MS = 250;
+const PREVIEW_TRACK_UPDATE_DEBOUNCE_MS = 220;
 
 type SavedSetup = SavedSetupSummary & {
   setup: ControlsState;
@@ -57,6 +59,9 @@ export class RaceController {
   private livePaused = false;
   private busy = false;
   private standingsUpdateAccumulator = 0;
+  private saveSessionTimer = 0;
+  private previewTrackTimer = 0;
+  private pendingPreviewTrackKey = "";
 
   constructor(config: RaceControllerConfig) {
     this.raceAudio.loop = true;
@@ -114,16 +119,20 @@ export class RaceController {
     this.options = nextOptions;
     this.mapSeed = nextMapSeed;
     this.obstacleSeed = nextObstacleSeed;
-    this.saveStoredSession();
+    this.scheduleStoredSessionSave();
     this.stopLiveRace();
 
-    this.runtimeTrack = this.createPreviewTrack();
+    if (mapSeedChanged || obstacleSeedChanged) {
+      this.schedulePreviewTrackUpdate();
+    }
 
-    this.renderer.loadTrackOptions(
-      anonymizeRaceBalls(expandOptionsToRaceBalls(this.options)),
-      this.runtimeTrack,
-      false,
-    );
+    if (optionsChanged) {
+      this.renderer.loadTrackOptions(
+        anonymizeRaceBalls(expandOptionsToRaceBalls(this.options)),
+        this.runtimeTrack,
+        false,
+      );
+    }
 
     this.ui.setRuntimeState(this.renderState(false));
     this.ui.setRaceStandings([]);
@@ -492,6 +501,34 @@ export class RaceController {
 
   private saveStoredSession(setup = this.serializedSetup()): void {
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(setup));
+  }
+
+  private scheduleStoredSessionSave(): void {
+    window.clearTimeout(this.saveSessionTimer);
+    this.saveSessionTimer = window.setTimeout(() => {
+      this.saveStoredSession();
+      this.saveSessionTimer = 0;
+    }, SESSION_SAVE_DEBOUNCE_MS);
+  }
+
+  private schedulePreviewTrackUpdate(): void {
+    const previewKey = `${this.mapSeed}\n${this.obstacleSeed}`;
+    this.pendingPreviewTrackKey = previewKey;
+
+    window.clearTimeout(this.previewTrackTimer);
+    this.previewTrackTimer = window.setTimeout(() => {
+      if (this.pendingPreviewTrackKey !== previewKey || this.liveRace) {
+        return;
+      }
+
+      this.runtimeTrack = this.createPreviewTrack();
+      this.renderer.loadTrackOptions(
+        anonymizeRaceBalls(expandOptionsToRaceBalls(this.options)),
+        this.runtimeTrack,
+        false,
+      );
+      this.previewTrackTimer = 0;
+    }, PREVIEW_TRACK_UPDATE_DEBOUNCE_MS);
   }
 
   private loadStoredSession(): void {

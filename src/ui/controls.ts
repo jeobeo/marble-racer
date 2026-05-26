@@ -211,7 +211,11 @@ export class ControlsUi {
       <div class="option-row" data-index="${index}">
         <input class="color-input" type="color" data-option-field="color" value="${escapeHtml(option.color ?? COLORS[index % COLORS.length])}" aria-label="Color" ${this.state.busy ? "disabled" : ""} />
         <input class="label-input" data-option-field="label" value="${escapeHtml(option.label)}" aria-label="Label" ${this.state.busy ? "disabled" : ""} />
-        <input class="weight-input" type="number" min="0" step="1" data-option-field="weight" value="${option.weight}" aria-label="Weight" ${this.state.busy ? "disabled" : ""} />
+        <div class="count-stepper" data-index="${index}">
+          <button class="count-button" type="button" data-action="weight-step" data-index="${index}" data-step="-1" title="Decrease option count" ${this.state.busy ? "disabled" : ""}>-</button>
+          <input class="weight-input" type="number" inputmode="numeric" min="0" step="1" data-option-field="weight" value="${option.weight}" aria-label="Option count" ${this.state.busy ? "disabled" : ""} />
+          <button class="count-button" type="button" data-action="weight-step" data-index="${index}" data-step="1" title="Increase option count" ${this.state.busy ? "disabled" : ""}>+</button>
+        </div>
         <span class="odds" data-odds>${odds.toFixed(1)}%</span>
         <button class="icon-button" type="button" data-action="remove" data-index="${index}" title="Remove option" ${this.state.options.length <= 2 || this.state.busy ? "disabled" : ""}>×</button>
       </div>
@@ -273,6 +277,7 @@ export class ControlsUi {
     const editableInputs = this.root.querySelectorAll<HTMLInputElement>("[data-option-field], [data-field='mapSeed'], [data-field='obstacleSeed']");
     const addButton = this.root.querySelector<HTMLButtonElement>('[data-action="add"]');
     const removeButtons = this.root.querySelectorAll<HTMLButtonElement>('[data-action="remove"]');
+    const countButtons = this.root.querySelectorAll<HTMLButtonElement>('[data-action="weight-step"]');
 
     editableInputs.forEach((input) => {
       input.disabled = this.state.busy;
@@ -284,6 +289,10 @@ export class ControlsUi {
 
     removeButtons.forEach((button) => {
       button.disabled = this.state.busy || this.state.options.length <= 2;
+    });
+
+    countButtons.forEach((button) => {
+      button.disabled = this.state.busy;
     });
   }
 
@@ -302,6 +311,21 @@ export class ControlsUi {
       const value = totalWeight > 0 ? (Math.max(0, option.weight) / totalWeight) * 100 : 0;
       odds.textContent = `${value.toFixed(1)}%`;
     });
+  }
+
+  private updateOptionRow(index: number): void {
+    const row = this.root.querySelector<HTMLElement>(`.option-row[data-index="${index}"]`);
+    const option = this.state.options[index];
+
+    if (!row || !option) {
+      return;
+    }
+
+    const input = row.querySelector<HTMLInputElement>('[data-option-field="weight"]');
+
+    if (input) {
+      input.value = String(option.weight);
+    }
   }
 
   private totalWeight(): number {
@@ -382,7 +406,9 @@ export class ControlsUi {
 
   private markNeedsPreparation(): void {
     this.state.playbackState = "idle";
-    this.updateDerivedUi();
+    this.updateActionButtons();
+    this.updateLoadingPanel();
+    this.updateInputDisabledState();
   }
 
   private handleInput(event: Event): void {
@@ -500,7 +526,7 @@ export class ControlsUi {
         color: generateDistinctColor(this.state.options, index),
       });
 
-      this.markNeedsPreparation();
+      this.state.playbackState = "idle";
       this.callbacks.onStateChange(this.getState());
       this.render(this.state);
     }
@@ -509,9 +535,27 @@ export class ControlsUi {
       const index = Number(target.dataset.index);
       this.state.options.splice(index, 1);
 
-      this.markNeedsPreparation();
+      this.state.playbackState = "idle";
       this.callbacks.onStateChange(this.getState());
       this.render(this.state);
+    }
+
+    if (action === "weight-step") {
+      const index = Number(target.dataset.index);
+      const step = Number(target.dataset.step);
+      const option = this.state.options[index];
+
+      if (!option || this.state.busy) {
+        return;
+      }
+
+      option.weight = Math.max(0, Math.round((Number(option.weight) || 0) + step));
+      this.state.playbackState = "idle";
+      this.updateOptionRow(index);
+      this.updateOddsLabels();
+      this.markNeedsPreparation();
+      this.callbacks.onStateChange(this.getState());
+      return;
     }
 
     if (action === "new-map-seed") {

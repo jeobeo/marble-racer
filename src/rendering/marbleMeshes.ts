@@ -13,6 +13,7 @@ import type { PickerOption, RaceBall } from "../simulation/types";
 import { createStartLayout } from "../shared/marbleLayout";
 
 type MarbleRenderable = PickerOption | RaceBall;
+const textureCache = new Map<string, Texture>();
 
 export type MarbleMesh = {
   id: string;
@@ -54,6 +55,13 @@ export function createMarbleMeshes(options: MarbleRenderable[], maxAnisotropy = 
 }
 
 function stripeTexture(color: Color, maxAnisotropy: number): Texture {
+  const cacheKey = `${color.getHexString()}:${maxAnisotropy}`;
+  const cached = textureCache.get(cacheKey);
+
+  if (cached) {
+    return cached;
+  }
+
   const canvas = document.createElement("canvas");
   canvas.width = 512;
   canvas.height = 256;
@@ -105,6 +113,7 @@ function stripeTexture(color: Color, maxAnisotropy: number): Texture {
   texture.magFilter = LinearFilter;
   texture.anisotropy = maxAnisotropy;
   texture.needsUpdate = true;
+  textureCache.set(cacheKey, texture);
 
   return texture;
 }

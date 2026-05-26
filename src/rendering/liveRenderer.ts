@@ -1,4 +1,4 @@
-import { Clock, Group, MeshStandardMaterial, Quaternion, Vector3 } from "three";
+import { BufferGeometry, Clock, Group, Material, MeshStandardMaterial, Quaternion, Vector3 } from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { createMarbleMeshes, type MarbleMesh } from "./marbleMeshes";
 import { createScene, resizeScene, type SceneBundle } from "./scene";
@@ -55,6 +55,9 @@ export class LiveRenderer {
   private readonly labelWorldPosition = new Vector3();
   private readonly labelScreenPosition = new Vector3();
   private readonly targetRotation = new Quaternion();
+  private readonly cameraTargetDelta = new Vector3();
+  private lastCollectedPowerupKey = "";
+  private lastDestroyedObstacleKey = "";
 
   constructor(canvas: HTMLCanvasElement) {
     this.bundle = createScene(canvas);
@@ -101,10 +104,12 @@ export class LiveRenderer {
     this.setTrack(track);
     this.state = "idle";
     this.placements = [];
+    this.lastCollectedPowerupKey = "";
+    this.lastDestroyedObstacleKey = "";
     this.hasLiveFollowTarget = false;
     this.followedBallId = "";
     this.options = options.map((option) => ({ ...option }));
-    this.raceGroup.clear();
+    this.clearRaceGroup();
 
     this.marbles = createMarbleMeshes(
       options,
@@ -188,7 +193,7 @@ export class LiveRenderer {
 
   private animate(): void {
     this.animationId = requestAnimationFrame(this.animate);
-    const deltaSeconds = this.clock.getDelta();
+    const deltaSeconds = Math.min(this.clock.getDelta(), 0.06);
 
     this.liveTick?.(deltaSeconds);
     this.updateFollowCamera(deltaSeconds);
@@ -199,8 +204,18 @@ export class LiveRenderer {
 
   private applyFrame(result: RaceResult, frame: RaceFrame): void {
     updateDynamicTrackMeshes(this.trackGroup, frame.time);
-    setCollectedPowerupsVisible(this.trackGroup, frame.collectedPowerupIds ?? []);
-    setDestroyedObstaclesVisible(this.trackGroup, frame.destroyedObstacleIds ?? []);
+
+    const collectedPowerupKey = (frame.collectedPowerupIds ?? []).join("|");
+    if (collectedPowerupKey !== this.lastCollectedPowerupKey) {
+      this.lastCollectedPowerupKey = collectedPowerupKey;
+      setCollectedPowerupsVisible(this.trackGroup, frame.collectedPowerupIds ?? []);
+    }
+
+    const destroyedObstacleKey = (frame.destroyedObstacleIds ?? []).join("|");
+    if (destroyedObstacleKey !== this.lastDestroyedObstacleKey) {
+      this.lastDestroyedObstacleKey = destroyedObstacleKey;
+      setDestroyedObstaclesVisible(this.trackGroup, frame.destroyedObstacleIds ?? []);
+    }
 
     const finishedAt = new Map(result.placements.map((placement) => [placement.ballId, placement.time]));
     const disqualifiedIds = new Set(result.disqualifications.map((disqualification) => disqualification.ballId));
@@ -275,7 +290,6 @@ export class LiveRenderer {
       this.hasLiveFollowTarget = true;
     }
 
-    this.updateOverlayLabels();
   }
 
   private updateFollowCamera(deltaSeconds: number): void {
@@ -283,12 +297,13 @@ export class LiveRenderer {
       return;
     }
 
-    const previousTarget = this.controls.target.clone();
+    this.cameraTargetDelta.copy(this.controls.target);
     const alpha = 1 - Math.exp(-deltaSeconds / CAMERA_FOLLOW_SECONDS);
 
     this.currentFollowTarget.lerp(this.desiredFollowTarget, alpha);
     this.controls.target.copy(this.currentFollowTarget);
-    this.bundle.camera.position.add(this.controls.target.clone().sub(previousTarget));
+    this.cameraTargetDelta.sub(this.controls.target).multiplyScalar(-1);
+    this.bundle.camera.position.add(this.cameraTargetDelta);
   }
 
   private applyPowerupVisuals(marble: MarbleMesh, activePowerups: string[]): void {
@@ -347,6 +362,29 @@ export class LiveRenderer {
     this.controls.update();
   }
 
+  private clearRaceGroup(): void {
+    const geometries = new Set<BufferGeometry>();
+    const materials = new Set<Material>();
+
+    this.raceGroup.traverse((object) => {
+      const mesh = object as { geometry?: BufferGeometry; material?: Material | Material[] };
+
+      if (mesh.geometry) {
+        geometries.add(mesh.geometry);
+      }
+
+      if (Array.isArray(mesh.material)) {
+        mesh.material.forEach((material) => materials.add(material));
+      } else if (mesh.material) {
+        materials.add(mesh.material);
+      }
+    });
+
+    this.raceGroup.clear();
+    materials.forEach((material) => material.dispose());
+    geometries.forEach((geometry) => geometry.dispose());
+  }
+
   private retargetCameraToStart(cameraOffset: Vector3, previousStartYaw: number): void {
     const frame = startCameraFrame(this.track);
     const yawDelta = this.track.start.yaw - previousStartYaw;
@@ -363,6 +401,10 @@ export class LiveRenderer {
 
   private setTrack(track?: TrackDefinition): void {
     if (!track) {
+      return;
+    }
+
+    if (track === this.track) {
       return;
     }
 

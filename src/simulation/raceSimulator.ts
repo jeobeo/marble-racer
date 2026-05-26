@@ -72,6 +72,9 @@ const SAFETY_SLAB_RESTITUTION = 0.015;
 
 const WALL_FRICTION = 0.34;
 const WALL_RESTITUTION = 0.08;
+const WALL_HALF_THICKNESS = 0.34;
+const WALL_HALF_HEIGHT = 1.05;
+const WALL_LENGTH_OVERLAP = 0.52;
 
 const BALL_DENSITY = 5.2;
 const BALL_FRICTION_MIN = 0.38;
@@ -233,7 +236,7 @@ export function createLiveRace(config: RaceConfig): LiveRaceSimulation {
         return currentFrame;
       }
 
-      accumulator += Math.min(deltaSeconds, 0.08);
+      accumulator += Math.min(deltaSeconds, 0.055);
       let fixedSteps = 0;
 
       while (accumulator >= FIXED_TIMESTEP && fixedSteps < 5) {
@@ -431,7 +434,7 @@ function createSegmentedWalls(
   samples: TrackDefinition["samples"],
   widthScale: number,
 ): void {
-  const step = 2;
+  const step = 1;
 
   for (let index = 0; index < samples.length - step; index += step) {
     const sample = samples[index];
@@ -449,10 +452,10 @@ function createSegmentedWalls(
       const normal = sample.normal;
 
       world.createCollider(
-        RAPIER.ColliderDesc.cuboid(0.24, 0.82, length / 2 + 0.32)
+        RAPIER.ColliderDesc.cuboid(WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, length / 2 + WALL_LENGTH_OVERLAP)
           .setTranslation(
             (sample.x + next.x) / 2 + normal.x * side * (width / 2 + 0.01),
-            (sample.y + next.y) / 2 + 0.48,
+            (sample.y + next.y) / 2 + 0.62,
             (sample.z + next.z) / 2 + normal.z * side * (width / 2 + 0.01),
           )
           .setRotation(trackRotation(yaw, pitch))
@@ -1424,6 +1427,7 @@ function createMarbles(
     const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
       .setTranslation(x, y, z)
       .setCanSleep(false)
+      .setCcdEnabled(true)
       .setLinearDamping(BALL_LINEAR_DAMPING)
       .setAngularDamping(BALL_ANGULAR_DAMPING)
       .setAdditionalSolverIterations(8);

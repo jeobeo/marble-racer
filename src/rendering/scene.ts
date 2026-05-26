@@ -21,8 +21,8 @@ export function createScene(canvas: HTMLCanvasElement): SceneBundle {
   camera.position.set(0, 9, -11);
   camera.lookAt(0, 1.8, 12);
 
-  const renderer = new WebGLRenderer({ canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio, 2));
+  const renderer = new WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "high-performance" });
+  renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio, 1.5));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = PCFSoftShadowMap;
 
@@ -32,7 +32,7 @@ export function createScene(canvas: HTMLCanvasElement): SceneBundle {
   const key = new DirectionalLight(0xffffff, 2.4);
   key.position.set(-5, 13, -4);
   key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.mapSize.set(1024, 1024);
   scene.add(key);
 
   const fill = new DirectionalLight(0x9cc7ff, 1.2);
@@ -46,7 +46,7 @@ export function resizeScene(bundle: SceneBundle, width: number, height: number):
   const renderWidth = Math.max(1, Math.floor(width));
   const renderHeight = Math.max(1, Math.floor(height));
 
-  bundle.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 2));
+  bundle.renderer.setPixelRatio(Math.min(globalThis.devicePixelRatio || 1, 1.5));
   bundle.camera.aspect = renderWidth / renderHeight;
   bundle.camera.updateProjectionMatrix();
   bundle.renderer.setSize(renderWidth, renderHeight, false);
