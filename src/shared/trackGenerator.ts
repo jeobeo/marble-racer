@@ -65,6 +65,20 @@ export type TrackMeshData = {
   indices: Uint32Array;
 };
 
+export type BoundaryPoint = {
+  x: number;
+  y: number;
+  z: number;
+};
+
+export type SplitSurface = {
+  road: TrackMeshData;
+  outerBoundaries: BoundaryPoint[][];
+  innerBoundary: BoundaryPoint[];
+  startDistance: number;
+  endDistance: number;
+};
+
 export type TrackDefinition = {
   seed: string;
   points: TrackPoint[];
@@ -81,6 +95,7 @@ export type TrackDefinition = {
     endDistance: number;
     side: -1 | 1;
   }>;
+  splitSurfaces: SplitSurface[];
   totalLength: number;
   finishDistance: number;
   catchDistance: number;
@@ -99,11 +114,45 @@ export type TrackFeatures = {
   spinners: Array<{ distance: number; phase: number; speed: number }>;
   hammers: Array<{ distance: number; phase: number; side: -1 | 1 }>;
   turnstiles: Array<{ distance: number; phase: number; speed: number }>;
+  missingWallSegments: Array<{ distance: number; length: number; side: -1 | 1 }>;
   powerups: Array<{ id: string; distance: number; offset: number; kind: PowerupKind }>;
-  splitModules: Array<{ startDistance: number; endDistance: number }>;
+  splitModules: Array<{
+    startDistance: number;
+    endDistance: number;
+    laneStartDistance: number;
+    laneEndDistance: number;
+    laneWidth: number;
+    laneSeparation: number;
+    waveAmplitude: number;
+    waveCycles: number;
+    wavePhase: number;
+    widthScale: number;
+    widthWaveAmplitude: number;
+    bankAmplitude: number;
+    heightAmplitude: number;
+    widthBoost: number;
+    side: -1 | 1;
+    leftProfile: SplitLaneProfile;
+    rightProfile: SplitLaneProfile;
+  }>;
 };
 
 export type PowerupKind = "speed" | "giant" | "tiny" | "ghost" | "slow" | "barrier" | "smash";
+
+type SplitLaneProfile = {
+  startEase: number;
+  endEase: number;
+  separationScale: number;
+  curveAmplitude: number;
+  curveCycles: number;
+  curvePhase: number;
+  tangentAmplitude: number;
+  tangentPhase: number;
+  widthScale: number;
+  widthWaveAmplitude: number;
+  bankAmplitude: number;
+  heightAmplitude: number;
+};
 
 type PlanPoint = {
   x: number;
@@ -152,16 +201,19 @@ function createTrackDefinition(
   const catchDistance = metrics.totalLength + metrics.catchRunout;
   const features = createFeatures(baseSamples, mapRng, obstacleRng, finishDistance);
   const samples = applyFeatureModifiers(baseSamples, features);
-  const branches = createBranches(samples, mapRng);
+  const branches = createBranches(samples, mapRng, features);
+  const splitSurfaces = createSplitSurfaces(samples, branches, features);
+  const splitRoadGaps = splitSurfaces.map(({ startDistance, endDistance }) => ({ startDistance, endDistance }));
 
   return {
     seed,
     points,
     samples,
-    road: createRibbon(samples, TRACK_WIDTH, 0.02),
+    road: createRibbon(samples, TRACK_WIDTH, 0.02, splitRoadGaps),
     leftWall: createWall(samples, -1),
     rightWall: createWall(samples, 1),
     branches,
+    splitSurfaces,
     totalLength: metrics.totalLength,
     finishDistance,
     catchDistance,
@@ -423,10 +475,742 @@ function generateFallbackPoints(rng: () => number, totalLength: number, startHei
   return points;
 }
 
-function createBranches(samples: TrackSample[], rng: () => number): TrackDefinition["branches"] {
-  void samples;
+function createBranches(samples: TrackSample[], rng: () => number, features: TrackFeatures): TrackDefinition["branches"] {
+  return features.splitModules.flatMap((module) =>
+    ([-1, 1] as const).map((side) => {
+      const branchSamples = createSplitLaneSamples(samples, module, side, rng);
+      const wallSamples = splitBranchWallSamples(branchSamples, module);
+
+      return {
+        road: createRibbon(branchSamples, TRACK_WIDTH, 0.02),
+        leftWall: createWall(wallSamples, -1),
+        rightWall: createWall(wallSamples, 1),
+        samples: branchSamples,
+        startDistance: module.startDistance,
+        endDistance: module.endDistance,
+        side,
+      };
+    }),
+  );
+}
+
+const SPLIT_ISLAND_ACTIVE_THRESHOLD = 0.28;
+
+type SplitSection = {
+  outerLeft: BoundaryPoint;
+  innerLeft: BoundaryPoint;
+  innerRight: BoundaryPoint;
+  outerRight: BoundaryPoint;
+  active: number;
+  distance: number;
+};
+
+function createSplitSurfaces(
+  mainSamples: TrackSample[],
+  branches: TrackDefinition["branches"],
+  features: TrackFeatures,
+): SplitSurface[] {
+  void branches;
+
+  return features.splitModules.flatMap((module) => {
+    const surface = createNaturalSplitSurface(mainSamples, module);
+    return surface ? [surface] : [];
+  });
+}
+
+function createNaturalSplitSurface(
+  mainSamples: TrackSample[],
+  module: TrackFeatures["splitModules"][number],
+): SplitSurface | null {
+  const moduleSamples = splitModuleSamples(mainSamples, module);
+
+  if (moduleSamples.length < 8) {
+    return null;
+  }
+
+  const sections = moduleSamples.map((sample, index) =>
+    createSplitSection(sample, module, index === 0 || index === moduleSamples.length - 1),
+  );
+  const road = createNaturalSplitRoadMesh(sections);
+
+  if (road.indices.length === 0 || !hasEnoughNaturalSplitClearance(sections, module)) {
+    return null;
+  }
+
+  // Keep split wall boundary points tied to the exact road section edges.
+  // Do not smooth these independently: independent smoothing makes the visual wall drift
+  // away from the split road mesh and creates the misaligned walls seen at forks.
+  const outerBoundaries = [
+    dedupeBoundaryPoints(sections.map((section) => section.outerLeft)),
+    dedupeBoundaryPoints(sections.map((section) => section.outerRight)),
+  ].filter((boundary) => boundary.length >= 2);
+
+  const innerBoundary = createRoundedSplitIslandBoundary(sections);
+
+  if (outerBoundaries.length !== 2 || innerBoundary.length < 10) {
+    return null;
+  }
+
+  return {
+    road,
+    outerBoundaries,
+    innerBoundary,
+    // Use the actual mesh boundary rows as the rendered replacement range.
+    // These rows are aligned to original main-track samples and are forced closed,
+    // so the replacement joins the normal road at identical edge vertices instead
+    // of leaving occasional cross-track seams.
+    startDistance: sections[0].distance,
+    endDistance: sections[sections.length - 1].distance,
+  };
+}
+
+function splitModuleSamples(
+  samples: TrackSample[],
+  module: TrackFeatures["splitModules"][number],
+): TrackSample[] {
+  // Split replacement meshes must start and end on exact main-track sample rows.
+  // If they start at arbitrary interpolated distances, the main thick-ribbon mesh
+  // and the split mesh terminate on different cross-sections, which creates the
+  // occasional visible seams at fork/merge boundaries. Interior rows remain dense
+  // and interpolated so the split floor still grades smoothly.
+  const startIndex = Math.max(1, firstSampleIndexAtOrAfter(samples, module.startDistance));
+  const endIndex = Math.min(samples.length - 2, lastSampleIndexAtOrBefore(samples, module.endDistance));
+
+  if (endIndex <= startIndex + 3) {
+    return [];
+  }
+
+  const startDistance = samples[startIndex].distance;
+  const endDistance = samples[endIndex].distance;
+  const span = Math.max(0.001, endDistance - startDistance);
+  const targetStep = 0.42;
+  const rowCount = Math.max(24, Math.ceil(span / targetStep));
+  const result: TrackSample[] = [samples[startIndex]];
+
+  for (let index = 1; index < rowCount; index += 1) {
+    const distance = startDistance + (span * index) / rowCount;
+    result.push(interpolatedSampleAtDistance(samples, distance));
+  }
+
+  result.push(samples[endIndex]);
+  return result;
+}
+
+function firstSampleIndexAtOrAfter(samples: TrackSample[], distance: number): number {
+  for (let index = 0; index < samples.length; index += 1) {
+    if (samples[index].distance >= distance) {
+      return index;
+    }
+  }
+
+  return samples.length - 1;
+}
+
+function lastSampleIndexAtOrBefore(samples: TrackSample[], distance: number): number {
+  for (let index = samples.length - 1; index >= 0; index -= 1) {
+    if (samples[index].distance <= distance) {
+      return index;
+    }
+  }
+
+  return 0;
+}
+
+function interpolatedSampleAtDistance(samples: TrackSample[], distance: number): TrackSample {
+  if (samples.length === 0) {
+    throw new Error("Cannot sample an empty track");
+  }
+
+  if (distance <= samples[0].distance) {
+    return samples[0];
+  }
+
+  const last = samples[samples.length - 1];
+  if (distance >= last.distance) {
+    return last;
+  }
+
+  let upperIndex = 1;
+  while (upperIndex < samples.length && samples[upperIndex].distance < distance) {
+    upperIndex += 1;
+  }
+
+  const a = samples[Math.max(0, upperIndex - 1)];
+  const b = samples[Math.min(samples.length - 1, upperIndex)];
+  const span = Math.max(0.0001, b.distance - a.distance);
+  const alpha = clamp((distance - a.distance) / span, 0, 1);
+  const tangent = normalize3({
+    x: lerp(a.tangent.x, b.tangent.x, alpha),
+    y: lerp(a.tangent.y, b.tangent.y, alpha),
+    z: lerp(a.tangent.z, b.tangent.z, alpha),
+  });
+  const normal = normalizeXZ({
+    x: lerp(a.normal.x, b.normal.x, alpha),
+    z: lerp(a.normal.z, b.normal.z, alpha),
+  });
+
+  return {
+    x: lerp(a.x, b.x, alpha),
+    y: lerp(a.y, b.y, alpha),
+    z: lerp(a.z, b.z, alpha),
+    distance,
+    tangent,
+    normal,
+    yaw: blendAngle(a.yaw, b.yaw, alpha),
+    width: lerp(a.width, b.width, alpha),
+    bank: lerp(a.bank, b.bank, alpha),
+    surfaceFriction: lerp(a.surfaceFriction, b.surfaceFriction, alpha),
+  };
+}
+
+
+function normalizeXZ(value: { x: number; z: number }): { x: number; z: number } {
+  const length = Math.hypot(value.x, value.z) || 1;
+  return { x: value.x / length, z: value.z / length };
+}
+
+function createSplitSection(
+  sample: TrackSample,
+  module: TrackFeatures["splitModules"][number],
+  forceClosed = false,
+): SplitSection {
+  const active = forceClosed ? 0 : naturalSplitOpenAmount(sample.distance, module);
+  const baseHalfWidth = (sample.width ?? TRACK_WIDTH) / 2;
+  const targetLaneWidth = module.laneWidth;
+  const halfGap = Math.max(0, module.laneSeparation * active * 0.5);
+  const splitHalfWidth = targetLaneWidth + halfGap;
+  const outerHalfWidth = lerp(baseHalfWidth, splitHalfWidth, active);
+  const innerHalfGap = halfGap;
+
+  return {
+    outerLeft: pointAtSampleOffset(sample, -outerHalfWidth, 0.02),
+    innerLeft: pointAtSampleOffset(sample, -innerHalfGap, 0.02),
+    innerRight: pointAtSampleOffset(sample, innerHalfGap, 0.02),
+    outerRight: pointAtSampleOffset(sample, outerHalfWidth, 0.02),
+    active,
+    distance: sample.distance,
+  };
+}
+
+function naturalSplitOpenAmount(
+  distance: number,
+  module: TrackFeatures["splitModules"][number],
+): number {
+  const open = smootherstep(module.startDistance, module.laneStartDistance, distance);
+  const close = 1 - smootherstep(module.laneEndDistance, module.endDistance, distance);
+  return clamp(Math.min(open, close), 0, 1);
+}
+
+function pointAtSampleOffset(sample: TrackSample, offset: number, lift: number): BoundaryPoint {
+  return {
+    x: sample.x + sample.normal.x * offset,
+    y: sample.y + lift + Math.sin(sample.bank ?? 0) * offset,
+    z: sample.z + sample.normal.z * offset,
+  };
+}
+
+function createNaturalSplitRoadMesh(sections: SplitSection[]): TrackMeshData {
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  for (const section of sections) {
+    pushBoundaryPoint(positions, section.outerLeft);
+    pushBoundaryPoint(positions, section.innerLeft);
+    pushBoundaryPoint(positions, section.innerRight);
+    pushBoundaryPoint(positions, section.outerRight);
+  }
+
+  for (let index = 0; index < sections.length - 1; index += 1) {
+    const start = index * 4;
+    const next = start + 4;
+    const active = Math.max(sections[index].active, sections[index + 1].active);
+
+    if (active < SPLIT_ISLAND_ACTIVE_THRESHOLD) {
+      addQuad(indices, start, next, start + 3, next + 3);
+    } else {
+      addQuad(indices, start, next, start + 1, next + 1);
+      addQuad(indices, start + 2, next + 2, start + 3, next + 3);
+    }
+  }
+
+  return {
+    vertices: new Float32Array(positions),
+    indices: new Uint32Array(indices),
+  };
+}
+
+function pushBoundaryPoint(positions: number[], point: BoundaryPoint): void {
+  positions.push(point.x, point.y, point.z);
+}
+
+function addQuad(indices: number[], a0: number, b0: number, a1: number, b1: number): void {
+  indices.push(a0, b0, a1, a1, b0, b1);
+}
+
+function hasEnoughNaturalSplitClearance(
+  sections: SplitSection[],
+  module: TrackFeatures["splitModules"][number],
+): boolean {
+  // This is intentionally permissive. Earlier versions rejected splits during
+  // the gradual fork/merge ramps, so the renderer cut fewer valid split areas.
+  const matureSections = sections.filter((section) => section.active > 0.5);
+
+  if (matureSections.length < 2) {
+    return false;
+  }
+
+  const minLaneWidth = Math.max(1.75, module.laneWidth * 0.46);
+  const minIslandWidth = 0.72;
+
+  for (const section of matureSections) {
+    const leftLaneWidth = horizontalDistance(section.outerLeft, section.innerLeft);
+    const rightLaneWidth = horizontalDistance(section.innerRight, section.outerRight);
+    const islandWidth = horizontalDistance(section.innerLeft, section.innerRight);
+
+    if (leftLaneWidth < minLaneWidth || rightLaneWidth < minLaneWidth || islandWidth < minIslandWidth) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function createRoundedSplitIslandBoundary(sections: SplitSection[]): BoundaryPoint[] {
+  // Match the road split threshold so the island wall starts exactly where the
+  // split road mesh first opens into two lanes. Keep this threshold high enough
+  // to avoid needle-thin island caps that create tiny triangles and protruding
+  // wall pieces at fork/merge transitions.
+  const activeSections = sections.filter((section) => section.active >= SPLIT_ISLAND_ACTIVE_THRESHOLD);
+
+  if (activeSections.length < 4) {
+    return [];
+  }
+
+  const left = activeSections.map((section) => section.innerLeft);
+  const right = activeSections.map((section) => section.innerRight);
+  const startLeft = left[0];
+  const startRight = right[0];
+  const endLeft = left[left.length - 1];
+  const endRight = right[right.length - 1];
+  const startMid = midpointBoundary(startLeft, startRight);
+  const endMid = midpointBoundary(endLeft, endRight);
+  const startNextMid = midpointBoundary(left[Math.min(2, left.length - 1)], right[Math.min(2, right.length - 1)]);
+  const endPreviousMid = midpointBoundary(left[Math.max(0, left.length - 3)], right[Math.max(0, right.length - 3)]);
+  const startTangent = normalizeBoundaryDirection(startMid, startNextMid);
+  const endTangent = normalizeBoundaryDirection(endPreviousMid, endMid);
+  const startGap = horizontalDistance(startLeft, startRight);
+  const endGap = horizontalDistance(endLeft, endRight);
+  // Keep cap control points inside the island footprint. A large fixed bulge on
+  // a barely-open island was the main source of occasional spike/triangle
+  // artifacts near split entry/exit.
+  const startBulge = clamp(startGap * 0.42, 0.12, 0.5);
+  const endBulge = clamp(endGap * 0.42, 0.12, 0.5);
+
+  const endCap = quadraticBoundaryArc(
+    endLeft,
+    offsetBoundary(endMid, endTangent.x * endBulge, endTangent.z * endBulge),
+    endRight,
+    9,
+  ).slice(1);
+  const startCap = quadraticBoundaryArc(
+    startRight,
+    offsetBoundary(startMid, -startTangent.x * startBulge, -startTangent.z * startBulge),
+    startLeft,
+    9,
+  ).slice(1);
+
+  // Keep the island wall loop edge-anchored to the actual split road inner edges.
+  // The cap arcs are rounded, but the longitudinal sides are not independently
+  // smoothed; smoothing here causes wall/road mismatch.
+  return dedupeBoundaryPoints([
+    ...left,
+    ...endCap,
+    ...right.reverse(),
+    ...startCap,
+  ]);
+}
+
+function midpointBoundary(a: BoundaryPoint, b: BoundaryPoint): BoundaryPoint {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+    z: (a.z + b.z) / 2,
+  };
+}
+
+function normalizeBoundaryDirection(a: BoundaryPoint, b: BoundaryPoint): { x: number; z: number } {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const length = Math.hypot(dx, dz) || 1;
+  return { x: dx / length, z: dz / length };
+}
+
+function offsetBoundary(point: BoundaryPoint, dx: number, dz: number): BoundaryPoint {
+  return { x: point.x + dx, y: point.y, z: point.z + dz };
+}
+
+function quadraticBoundaryArc(
+  start: BoundaryPoint,
+  control: BoundaryPoint,
+  end: BoundaryPoint,
+  steps: number,
+): BoundaryPoint[] {
+  const points: BoundaryPoint[] = [];
+
+  for (let index = 0; index <= steps; index += 1) {
+    const t = index / steps;
+    const omt = 1 - t;
+    points.push({
+      x: omt * omt * start.x + 2 * omt * t * control.x + t * t * end.x,
+      y: omt * omt * start.y + 2 * omt * t * control.y + t * t * end.y,
+      z: omt * omt * start.z + 2 * omt * t * control.z + t * t * end.z,
+    });
+  }
+
+  return points;
+}
+
+function smoothBoundaryPath(points: BoundaryPoint[], closed: boolean, iterations: number): BoundaryPoint[] {
+  let smoothed = dedupeBoundaryPoints(points);
+
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    if (smoothed.length < 3) {
+      return smoothed;
+    }
+
+    const next: BoundaryPoint[] = [];
+    const count = smoothed.length;
+    const segmentCount = closed ? count : count - 1;
+
+    if (!closed) {
+      next.push(smoothed[0]);
+    }
+
+    for (let index = 0; index < segmentCount; index += 1) {
+      const a = smoothed[index];
+      const b = smoothed[(index + 1) % count];
+
+      next.push(lerpBoundaryPoint(a, b, 0.25), lerpBoundaryPoint(a, b, 0.75));
+    }
+
+    if (!closed) {
+      next.push(smoothed[count - 1]);
+    }
+
+    smoothed = dedupeBoundaryPoints(next);
+  }
+
+  return smoothed;
+}
+
+function lerpBoundaryPoint(a: BoundaryPoint, b: BoundaryPoint, alpha: number): BoundaryPoint {
+  return {
+    x: a.x + (b.x - a.x) * alpha,
+    y: a.y + (b.y - a.y) * alpha,
+    z: a.z + (b.z - a.z) * alpha,
+  };
+}
+
+function dedupeBoundaryPoints(points: BoundaryPoint[]): BoundaryPoint[] {
+  return points.filter((point, index) => {
+    if (index === 0) {
+      return true;
+    }
+
+    return Math.hypot(
+      point.x - points[index - 1].x,
+      point.y - points[index - 1].y,
+      point.z - points[index - 1].z,
+    ) > 0.04;
+  });
+}
+
+function horizontalDistance(a: BoundaryPoint, b: BoundaryPoint): number {
+  return Math.hypot(a.x - b.x, a.z - b.z);
+}
+
+function createSplitLaneSamples(
+  samples: TrackSample[],
+  module: TrackFeatures["splitModules"][number],
+  side: -1 | 1,
+  rng: () => number,
+): TrackSample[] {
   void rng;
-  return [];
+  const profile = side < 0 ? module.leftProfile : module.rightProfile;
+  const length = module.endDistance - module.startDistance;
+  const connectorFraction = clamp((module.laneStartDistance - module.startDistance) / Math.max(length, 0.0001), 0.26, 0.42);
+  const laneSamples = [
+    sampleAtDistance(samples, module.startDistance),
+    sampleAtDistance(samples, module.laneStartDistance),
+    ...samples.filter((sample) => sample.distance > module.startDistance && sample.distance < module.endDistance),
+    sampleAtDistance(samples, module.laneEndDistance),
+    sampleAtDistance(samples, module.endDistance),
+  ]
+    .sort((a, b) => a.distance - b.distance)
+    .filter((sample, index, sorted) => index === 0 || Math.abs(sample.distance - sorted[index - 1].distance) > 0.001)
+    .map((sample) => ({ ...sample }));
+
+  const positionedSamples = laneSamples.map((sample) => {
+    const t = clamp((sample.distance - module.startDistance) / Math.max(length, 0.0001), 0, 1);
+    const peelOut = smootherstep(0, connectorFraction * profile.startEase, t);
+    const peelIn = 1 - smootherstep(1 - connectorFraction * profile.endEase, 1, t);
+    const envelope = peelOut * peelIn;
+    const routeEnvelope = envelope;
+    const separation = module.laneSeparation * profile.separationScale * routeEnvelope;
+    const routeCurve = Math.sin(t * Math.PI * profile.curveCycles + profile.curvePhase) * profile.curveAmplitude * envelope;
+    const tangentDrift =
+      Math.sin(t * Math.PI * 2 + profile.tangentPhase) *
+      profile.tangentAmplitude *
+      envelope *
+      Math.sin(t * Math.PI);
+    const contour = 0.5 + 0.5 * Math.sin(t * Math.PI * 2 + profile.curvePhase);
+    const width =
+      module.laneWidth * profile.widthScale +
+      profile.widthWaveAmplitude * contour * envelope;
+    const blendedWidth = lerp(sample.width ?? TRACK_WIDTH, clamp(width, TRACK_WIDTH * 0.78, TRACK_WIDTH * 1.18), envelope);
+
+    return {
+      ...sample,
+      x: sample.x + sample.normal.x * side * (separation + routeCurve) + sample.tangent.x * tangentDrift,
+      y: sample.y - Math.sin(t * Math.PI) * length * 0.0025 + Math.sin(t * Math.PI * 2 + profile.curvePhase * 0.7) * profile.heightAmplitude * envelope,
+      z: sample.z + sample.normal.z * side * (separation + routeCurve) + sample.tangent.z * tangentDrift,
+      width: blendedWidth,
+      bank: clamp(
+        side * envelope * 0.08 +
+          Math.sin(t * Math.PI * 2 + profile.curvePhase) * profile.bankAmplitude * envelope,
+        -0.24,
+        0.24,
+      ),
+    };
+  });
+
+  return recalculateSampleFrames(positionedSamples);
+}
+
+function splitBranchWallSamples(
+  branchSamples: TrackSample[],
+  module: TrackFeatures["splitModules"][number],
+): TrackSample[] {
+  return branchSamples.filter(
+    (sample) => sample.distance >= module.laneStartDistance && sample.distance <= module.laneEndDistance,
+  );
+}
+
+function recalculateSampleFrames(samples: TrackSample[]): TrackSample[] {
+  return samples.map((sample, index) => {
+    const before = samples[Math.max(0, index - 1)];
+    const after = samples[Math.min(samples.length - 1, index + 1)];
+    const tangent = normalize3({
+      x: after.x - before.x,
+      y: after.y - before.y,
+      z: after.z - before.z,
+    });
+    const flatLength = Math.hypot(tangent.x, tangent.z) || 1;
+    const flatTangent = { x: tangent.x / flatLength, z: tangent.z / flatLength };
+
+    return {
+      ...sample,
+      tangent,
+      normal: { x: flatTangent.z, z: -flatTangent.x },
+      yaw: Math.atan2(flatTangent.x, flatTangent.z),
+    };
+  });
+}
+
+function createSplitModules(rng: () => number, finishDistance: number, samples: TrackSample[]): TrackFeatures["splitModules"] {
+  const maxByLength = Math.max(1, Math.floor(finishDistance / 165));
+  const desiredByLength = finishDistance > 520 ? 4 : finishDistance > 360 ? 3 : finishDistance > 230 ? 2 : 1;
+  const count = Math.min(5, maxByLength + 1, desiredByLength + (rng() < 0.35 ? 1 : 0));
+  const modules: TrackFeatures["splitModules"] = [];
+
+  for (let attempt = 0; attempt < count * 140 && modules.length < count; attempt += 1) {
+    const length = clamp(finishDistance * (0.12 + rng() * 0.12), 76, 160);
+    const startDistance = finishDistance * (0.1 + rng() * 0.74);
+    const endDistance = startDistance + length;
+
+    if (endDistance > finishDistance - 18) {
+      continue;
+    }
+
+    const startSample = sampleAtDistance(samples, startDistance);
+    const middleSample = sampleAtDistance(samples, (startDistance + endDistance) / 2);
+    const endSample = sampleAtDistance(samples, endDistance);
+    const hasEnoughSpace =
+      (startSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.58 &&
+      (middleSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.58 &&
+      (endSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.58;
+    const splitIsStraightEnough = isBranchSectionSafeRelaxed(samples, startDistance, endDistance);
+    const separated = modules.every(
+      (module) => endDistance < module.startDistance - 34 || startDistance > module.endDistance + 34,
+    );
+
+    if (!hasEnoughSpace || !splitIsStraightEnough || !separated) {
+      continue;
+    }
+
+    const laneWidth = TRACK_WIDTH * (0.78 + rng() * 0.15);
+    const endpointOverlap = clamp(length * 0.22, 18, 38);
+    const laneSeparation = laneWidth * (0.82 + rng() * 0.18) + 1.8 + rng() * 1.6;
+    const module = {
+      startDistance,
+      endDistance,
+      laneStartDistance: startDistance + endpointOverlap,
+      laneEndDistance: endDistance - endpointOverlap,
+      laneWidth,
+      laneSeparation,
+      waveAmplitude: 0,
+      waveCycles: 1,
+      wavePhase: rng() * Math.PI * 2,
+      widthScale: 1,
+      widthWaveAmplitude: 0,
+      bankAmplitude: 0,
+      heightAmplitude: 0,
+      widthBoost: 0,
+      side: (rng() < 0.5 ? -1 : 1) as -1 | 1,
+      leftProfile: createSplitLaneProfile(rng, -1),
+      rightProfile: createSplitLaneProfile(rng, 1),
+    };
+    const leftBranch = createSplitLaneSamples(samples, module, -1, rng);
+    const rightBranch = createSplitLaneSamples(samples, module, 1, rng);
+
+    if (!isSplitRoutePairSafe(samples, leftBranch, rightBranch, module) && rng() < 0.18) {
+      continue;
+    }
+
+    modules.push(module);
+  }
+
+  if (modules.length < count && count > 0) {
+    for (let attempt = 0; attempt < 100 && modules.length < count; attempt += 1) {
+      const length = clamp(finishDistance * (0.1 + rng() * 0.14), 72, 150);
+      const startDistance = finishDistance * (0.1 + rng() * 0.75);
+      const endDistance = startDistance + length;
+
+      if (endDistance > finishDistance - 18) {
+        continue;
+      }
+
+      const startSample = sampleAtDistance(samples, startDistance);
+      const middleSample = sampleAtDistance(samples, (startDistance + endDistance) / 2);
+      const endSample = sampleAtDistance(samples, endDistance);
+      const hasEnoughSpace =
+        (startSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.55 &&
+        (middleSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.55 &&
+        (endSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.55;
+
+      const separated = modules.every(
+        (module) => endDistance < module.startDistance - 30 || startDistance > module.endDistance + 30,
+      );
+
+      if (!hasEnoughSpace || !separated) {
+        continue;
+      }
+
+      const laneWidth = TRACK_WIDTH * (0.76 + rng() * 0.16);
+      const endpointOverlap = clamp(length * 0.22, 18, 36);
+      const laneSeparation = laneWidth * (0.8 + rng() * 0.18) + 1.7 + rng() * 1.5;
+      const module = {
+        startDistance,
+        endDistance,
+        laneStartDistance: startDistance + endpointOverlap,
+        laneEndDistance: endDistance - endpointOverlap,
+        laneWidth,
+        laneSeparation,
+        waveAmplitude: 0,
+        waveCycles: 1,
+        wavePhase: rng() * Math.PI * 2,
+        widthScale: 1,
+        widthWaveAmplitude: 0,
+        bankAmplitude: 0,
+        heightAmplitude: 0,
+        widthBoost: 0,
+        side: (rng() < 0.5 ? -1 : 1) as -1 | 1,
+        leftProfile: createSplitLaneProfile(rng, -1),
+        rightProfile: createSplitLaneProfile(rng, 1),
+      };
+      modules.push(module);
+    }
+  }
+
+  return modules.sort((a, b) => a.startDistance - b.startDistance);
+}
+
+function createSplitLaneProfile(rng: () => number, side: -1 | 1): SplitLaneProfile {
+  return {
+    startEase: 0.92 + rng() * 0.16,
+    endEase: 0.92 + rng() * 0.16,
+    separationScale: 0.98 + rng() * 0.08,
+    curveAmplitude: rng() < 0.72 ? 0 : 0.25 + rng() * 0.75,
+    curveCycles: rng() < 0.5 ? 1 : 1.5,
+    curvePhase: rng() * Math.PI * 2 + side * (0.35 + rng() * 0.75),
+    tangentAmplitude: rng() < 0.72 ? 0 : 0.2 + rng() * 0.55,
+    tangentPhase: rng() * Math.PI * 2,
+    widthScale: 0.94 + rng() * 0.12,
+    widthWaveAmplitude: 0.05 + rng() * 0.2,
+    bankAmplitude: 0.012 + rng() * 0.025,
+    heightAmplitude: 0.005 + rng() * 0.025,
+  };
+}
+
+function isBranchSectionSafe(samples: TrackSample[], startDistance: number, endDistance: number): boolean {
+  const sampleCount = 8;
+  let previous = sampleAtDistance(samples, startDistance);
+  let yawDrift = 0;
+  let pitchDrift = 0;
+
+  for (let index = 1; index <= sampleCount; index += 1) {
+    const distance = startDistance + ((endDistance - startDistance) * index) / sampleCount;
+    const current = sampleAtDistance(samples, distance);
+    yawDrift += Math.abs(wrapAngle(current.yaw - previous.yaw));
+    pitchDrift += Math.abs(current.tangent.y - previous.tangent.y);
+    previous = current;
+  }
+
+  return yawDrift < 1.15 && pitchDrift < 0.55;
+}
+
+function isBranchSectionSafeRelaxed(samples: TrackSample[], startDistance: number, endDistance: number): boolean {
+  const sampleCount = 8;
+  let previous = sampleAtDistance(samples, startDistance);
+  let yawDrift = 0;
+  let pitchDrift = 0;
+
+  for (let index = 1; index <= sampleCount; index += 1) {
+    const distance = startDistance + ((endDistance - startDistance) * index) / sampleCount;
+    const current = sampleAtDistance(samples, distance);
+    yawDrift += Math.abs(wrapAngle(current.yaw - previous.yaw));
+    pitchDrift += Math.abs(current.tangent.y - previous.tangent.y);
+    previous = current;
+  }
+
+  return yawDrift < 2.45 && pitchDrift < 0.95;
+}
+
+function isSplitRoutePairSafe(
+  mainSamples: TrackSample[],
+  leftBranch: TrackSample[],
+  rightBranch: TrackSample[],
+  module: TrackFeatures["splitModules"][number],
+): boolean {
+  void mainSamples;
+  const length = module.endDistance - module.startDistance;
+
+  if (hasBadTrackGeometry(leftBranch, length) || hasBadTrackGeometry(rightBranch, length)) {
+    return false;
+  }
+
+  for (let index = 3; index < leftBranch.length - 3; index += 6) {
+    const left = leftBranch[index];
+    const right = rightBranch[index];
+    const t = clamp((left.distance - module.startDistance) / Math.max(length, 0.0001), 0, 1);
+    const expectedGap = ((left.width ?? TRACK_WIDTH) + (right.width ?? TRACK_WIDTH)) / 2 + 1.4;
+
+    if (Math.hypot(left.x - right.x, left.z - right.z) < expectedGap && t > 0.12 && t < 0.88) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function createFeatures(samples: TrackSample[], mapRng: () => number, rng: () => number, finishDistance: number): TrackFeatures {
@@ -451,8 +1235,18 @@ function createFeatures(samples: TrackSample[], mapRng: () => number, rng: () =>
     });
   }
 
-  const split = wideZones.find((zone) => zone.kind === "split");
-  const splitModules = split ? [{ startDistance: split.startDistance + 1.6, endDistance: split.endDistance - 1.6 }] : [];
+  const splitModules = createSplitModules(mapRng, finishDistance, samples);
+  for (const module of splitModules) {
+    const length = module.endDistance - module.startDistance;
+    const markerCount = Math.max(3, Math.ceil(length / 34));
+
+    for (let marker = 0; marker <= markerCount; marker += 1) {
+      reserved.push({
+        distance: lerp(module.startDistance, module.endDistance, marker / markerCount),
+        radius: 15,
+      });
+    }
+  }
 
   const mix = chooseObstacleMix(rng);
   const lengthScale = clamp(finishDistance / 650, 0.85, 1.35);
@@ -528,6 +1322,20 @@ function createFeatures(samples: TrackSample[], mapRng: () => number, rng: () =>
     phase: rng() * Math.PI * 2,
     speed: (rng() < 0.5 ? -1 : 1) * (0.28 + rng() * 0.22),
   }));
+  const missingWallSegments = pickFeatureDistances(
+    rng,
+    finishDistance,
+    mix.missingWallSegments ? Math.round((3 + Math.floor(rng() * 8)) * densityScale) : 0,
+    4.4,
+    reserved,
+    samples,
+    true,
+    0.18,
+  ).map((distance) => ({
+    distance,
+    length: 2.8 + rng() * 3.4,
+    side: (rng() < 0.5 ? -1 : 1) as -1 | 1,
+  }));
   const greenBumpers = pickFeatureDistances(
     rng,
     finishDistance,
@@ -564,6 +1372,7 @@ function createFeatures(samples: TrackSample[], mapRng: () => number, rng: () =>
     spinners,
     hammers,
     turnstiles,
+    missingWallSegments,
     powerups,
     splitModules,
   };
@@ -574,6 +1383,7 @@ type ObstacleMix = {
   spinners: boolean;
   hammers: boolean;
   turnstiles: boolean;
+  missingWallSegments: boolean;
 };
 
 function chooseObstacleMix(rng: () => number): ObstacleMix {
@@ -582,6 +1392,7 @@ function chooseObstacleMix(rng: () => number): ObstacleMix {
     "spinners",
     "hammers",
     "turnstiles",
+    "missingWallSegments",
   ];
   const shuffled = shuffleStrings(entries, rng);
   const targetCount = 1 + Math.floor(rng() * entries.length);
@@ -592,6 +1403,7 @@ function chooseObstacleMix(rng: () => number): ObstacleMix {
     spinners: selected.has("spinners"),
     hammers: selected.has("hammers"),
     turnstiles: selected.has("turnstiles"),
+    missingWallSegments: selected.has("missingWallSegments"),
   };
 }
 
@@ -895,7 +1707,7 @@ export function progressForPosition(track: TrackDefinition, position: { x: numbe
   let closest = track.samples[0];
   let closestScore = Number.POSITIVE_INFINITY;
 
-  for (const sample of track.samples) {
+  for (const sample of raceRouteSamples(track)) {
     const dx = sample.x - position.x;
     const dz = sample.z - position.z;
     const dy = position.y === undefined ? 0 : (sample.y - position.y) * 0.42;
@@ -917,7 +1729,7 @@ export function trackDistanceForPosition(
   let closest = track.samples[0];
   let closestScore = Number.POSITIVE_INFINITY;
 
-  for (const sample of track.samples) {
+  for (const sample of raceRouteSamples(track)) {
     const dx = sample.x - position.x;
     const dz = sample.z - position.z;
     const dy = sample.y - position.y;
@@ -944,6 +1756,10 @@ export function trackDistanceForPosition(
       verticalDistance <= 3.2 &&
       position.y > closest.y - 2.2,
   };
+}
+
+function raceRouteSamples(track: TrackDefinition): TrackSample[] {
+  return track.branches.length === 0 ? track.samples : [track.samples, ...track.branches.map((branch) => branch.samples)].flat();
 }
 
 export function sampleTrack(points: TrackPoint[], count: number, totalLength = TRACK_LENGTH, startHeight = START_HEIGHT): TrackSample[] {
@@ -1011,7 +1827,12 @@ function enforceDownhillProfile(points: TrackPoint[], totalLength: number, start
   }
 }
 
-export function createRibbon(samples: TrackSample[], width: number, yOffset: number): TrackMeshData {
+export function createRibbon(
+  samples: TrackSample[],
+  width: number,
+  yOffset: number,
+  gaps: Array<{ startDistance: number; endDistance: number }> = [],
+): TrackMeshData {
   const positions: number[] = [];
   const indices: number[] = [];
 
@@ -1029,12 +1850,22 @@ export function createRibbon(samples: TrackSample[], width: number, yOffset: num
     }
 
     if (index < samples.length - 1) {
+      const segmentDistance = (sample.distance + samples[index + 1].distance) / 2;
+
+      if (isDistanceInGap(segmentDistance, gaps)) {
+        continue;
+      }
+
       const start = index * 2;
       indices.push(start, start + 2, start + 1, start + 1, start + 2, start + 3);
     }
   }
 
   return { vertices: new Float32Array(positions), indices: new Uint32Array(indices) };
+}
+
+function isDistanceInGap(distance: number, gaps: Array<{ startDistance: number; endDistance: number }>): boolean {
+  return gaps.some((gap) => distance > gap.startDistance && distance < gap.endDistance);
 }
 
 export function createWall(samples: TrackSample[], side: -1 | 1): TrackMeshData {
@@ -1141,6 +1972,12 @@ function smoothstep(edge0: number, edge1: number, value: number): number {
   const t = clamp((value - edge0) / Math.max(edge1 - edge0, 0.0001), 0, 1);
 
   return t * t * (3 - 2 * t);
+}
+
+function smootherstep(edge0: number, edge1: number, value: number): number {
+  const t = clamp((value - edge0) / Math.max(edge1 - edge0, 0.0001), 0, 1);
+
+  return t * t * t * (t * (t * 6 - 15) + 10);
 }
 
 function wrapAngle(angle: number): number {

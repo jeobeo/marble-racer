@@ -75,13 +75,13 @@ npm run preview
 
 ## Music
 
-Put music files in:
+Put `.wav` or `.mp3` music files in:
 
 ```text
 public/music
 ```
 
-The app randomly selects tracks from the configured music list and plays music only while the race is running. Pausing pauses the music; resetting restarts it.
+The app automatically builds a playable track library from that folder when Vite starts or builds. In dev mode, `/music/manifest.json` is regenerated when the app requests it, so newly added tracks are picked up after a page refresh without editing source files. The app randomly selects from that library and plays music only while the race is running. Pausing pauses the music; resetting restarts it.
 
 ## Deploy To Render
 

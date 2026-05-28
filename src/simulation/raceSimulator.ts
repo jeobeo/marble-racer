@@ -5,6 +5,7 @@ import type { PowerupKind } from "../shared/trackGenerator";
 import { DEFAULT_BALL_RADIUS, createStartLayout } from "../shared/marbleLayout";
 import {
   TRACK_WIDTH,
+  type BoundaryPoint,
   type TrackDefinition,
   type TrackMeshData,
   generateTrack,
@@ -75,6 +76,13 @@ const WALL_RESTITUTION = 0.08;
 const WALL_HALF_THICKNESS = 0.34;
 const WALL_HALF_HEIGHT = 1.05;
 const WALL_LENGTH_OVERLAP = 0.52;
+
+// Keep physics wall dimensions in lockstep with src/rendering/trackMeshes.ts.
+// Wall colliders below are now generated from the same edge-anchored mesh logic
+// used by rendering instead of separate cuboids, so what is visible is what collides.
+const WALL_VISUAL_THICKNESS = 0.52;
+const WALL_EXTENSION_BELOW = 2.85;
+const WALL_HEIGHT_ABOVE = 1.18;
 
 const BALL_DENSITY = 5.2;
 const BALL_FRICTION_MIN = 0.38;
@@ -374,14 +382,16 @@ function createWorld(): RAPIER.World {
 }
 
 function createTrack(world: RAPIER.World, track: TrackDefinition): Array<MovingVerticalObstacle | DynamicBody> {
-  createRoadCollider(world, track.road);
-  createRoadSafetySlabs(world, track.samples);
-  createSegmentedWalls(world, track, track.samples, 1);
+  const splitRoadGaps = track.splitSurfaces.map(({ startDistance, endDistance }) => ({ startDistance, endDistance }));
 
-  for (const branch of track.branches) {
-    createRoadCollider(world, branch.road);
-    createSegmentedWalls(world, track, branch.samples, 0.82);
+  createRoadCollider(world, track.road);
+  createRoadSafetySlabs(world, track.samples, splitRoadGaps);
+
+  for (const surface of track.splitSurfaces) {
+    createRoadCollider(world, surface.road);
   }
+
+  createVisualWallColliders(world, track);
 
   const dynamicBodies = createFeatureColliders(world, track);
   createCatchContainer(world, track);
@@ -400,12 +410,22 @@ function createRoadCollider(world: RAPIER.World, mesh: TrackMeshData): void {
   );
 }
 
-function createRoadSafetySlabs(world: RAPIER.World, samples: TrackDefinition["samples"]): void {
+function createRoadSafetySlabs(
+  world: RAPIER.World,
+  samples: TrackDefinition["samples"],
+  gaps: Array<{ startDistance: number; endDistance: number }> = [],
+): void {
   const step = 3;
 
   for (let index = 0; index < samples.length - step; index += step) {
     const sample = samples[index];
     const next = samples[index + step];
+    const segmentDistance = (sample.distance + next.distance) / 2;
+
+    if (isRoadSegmentGap(segmentDistance, gaps)) {
+      continue;
+    }
+
     const width = ((sample.width ?? TRACK_WIDTH) + (next.width ?? TRACK_WIDTH)) / 2;
     const length = Math.hypot(next.x - sample.x, next.y - sample.y, next.z - sample.z);
     const yaw = Math.atan2(next.x - sample.x, next.z - sample.z);
@@ -428,11 +448,252 @@ function createRoadSafetySlabs(world: RAPIER.World, samples: TrackDefinition["sa
   }
 }
 
+function isRoadSegmentGap(distance: number, gaps: Array<{ startDistance: number; endDistance: number }>): boolean {
+  return gaps.some((gap) => distance > gap.startDistance && distance < gap.endDistance);
+}
+
+type WallPoint = { x: number; y: number; z: number };
+type BoundaryWall = { points: WallPoint[]; closed: boolean };
+
+function createBoundaryWallColliders(world: RAPIER.World, points: WallPoint[], closed: boolean): void {
+  const segmentCount = closed ? points.length : points.length - 1;
+
+  for (let index = 0; index < segmentCount; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    const dx = next.x - current.x;
+    const dy = next.y - current.y;
+    const dz = next.z - current.z;
+    const length = Math.hypot(dx, dy, dz);
+
+    if (length < 0.08) {
+      continue;
+    }
+
+    const yaw = Math.atan2(dx, dz);
+    const pitch = Math.atan2(current.y - next.y, Math.hypot(dx, dz));
+
+    world.createCollider(
+      RAPIER.ColliderDesc.cuboid(WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, length / 2 + WALL_LENGTH_OVERLAP)
+        .setTranslation(
+          (current.x + next.x) / 2,
+          (current.y + next.y) / 2 + 0.62,
+          (current.z + next.z) / 2,
+        )
+        .setRotation(trackRotation(yaw, pitch))
+        .setFriction(WALL_FRICTION)
+        .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Max)
+        .setRestitution(WALL_RESTITUTION)
+        .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min)
+        .setCollisionGroups(TRACK_COLLISION_GROUPS),
+    );
+  }
+}
+
+function createSplitBoundaryWallColliders(world: RAPIER.World, track: TrackDefinition): void {
+  for (const boundary of createSplitBoundaryWalls(track)) {
+    const segmentCount = boundary.closed ? boundary.points.length : boundary.points.length - 1;
+
+    for (let index = 0; index < segmentCount; index += 1) {
+      const current = boundary.points[index];
+      const next = boundary.points[(index + 1) % boundary.points.length];
+      const dx = next.x - current.x;
+      const dy = next.y - current.y;
+      const dz = next.z - current.z;
+      const length = Math.hypot(dx, dy, dz);
+
+      if (length < 0.08) {
+        continue;
+      }
+
+      const yaw = Math.atan2(dx, dz);
+      const pitch = Math.atan2(current.y - next.y, Math.hypot(dx, dz));
+
+      world.createCollider(
+        RAPIER.ColliderDesc.cuboid(WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, length / 2 + WALL_LENGTH_OVERLAP)
+          .setTranslation(
+            (current.x + next.x) / 2,
+            (current.y + next.y) / 2 + 0.62,
+            (current.z + next.z) / 2,
+          )
+          .setRotation(trackRotation(yaw, pitch))
+          .setFriction(WALL_FRICTION)
+          .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Max)
+          .setRestitution(WALL_RESTITUTION)
+          .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min)
+          .setCollisionGroups(TRACK_COLLISION_GROUPS),
+      );
+    }
+  }
+}
+
+function createSplitBoundaryWalls(track: TrackDefinition): BoundaryWall[] {
+  return track.features.splitModules.flatMap((module) => {
+    const leftBranch = track.branches.find(
+      (branch) =>
+        branch.side === -1 &&
+        Math.abs(branch.startDistance - module.startDistance) < 0.01 &&
+        Math.abs(branch.endDistance - module.endDistance) < 0.01,
+    );
+    const rightBranch = track.branches.find(
+      (branch) =>
+        branch.side === 1 &&
+        Math.abs(branch.startDistance - module.startDistance) < 0.01 &&
+        Math.abs(branch.endDistance - module.endDistance) < 0.01,
+    );
+
+    if (!leftBranch || !rightBranch) {
+      return [];
+    }
+
+    const leftExterior = splitEdgePoints(track, module, leftBranch.samples, -1);
+    const rightExterior = splitEdgePoints(track, module, rightBranch.samples, 1);
+    const distances = leftBranch.samples.map((sample) => sample.distance);
+    const usableDistances = distances.filter((distance) => {
+      const left = wallEdgePoint(sampleAtDistance(leftBranch.samples, distance), 1);
+      const right = wallEdgePoint(sampleAtDistance(rightBranch.samples, distance), -1);
+
+      return Math.hypot(left.x - right.x, left.z - right.z) > WALL_HALF_THICKNESS * 7.6;
+    });
+    const walls: BoundaryWall[] = [
+      { points: smoothWallPath(leftExterior, false, 1), closed: false },
+      { points: smoothWallPath(rightExterior, false, 1), closed: false },
+    ].filter((wall) => wall.points.length >= 2);
+
+    if (usableDistances.length < 5) {
+      return walls;
+    }
+
+    const trim = Math.max(2, Math.floor(usableDistances.length * 0.025));
+    const stableDistances = usableDistances.slice(trim, usableDistances.length - trim);
+
+    if (stableDistances.length < 4) {
+      return walls;
+    }
+
+    const leftInner = stableDistances.map((distance) => wallEdgePoint(sampleAtDistance(leftBranch.samples, distance), 1));
+    const rightInnerForward = stableDistances.map((distance) => wallEdgePoint(sampleAtDistance(rightBranch.samples, distance), -1));
+    const startCap = capCurve(rightInnerForward[0], leftInner[0]);
+    const endCap = capCurve(leftInner[leftInner.length - 1], rightInnerForward[rightInnerForward.length - 1]);
+    const island = [
+      ...leftInner,
+      ...endCap.slice(1),
+      ...rightInnerForward.reverse().slice(1),
+      ...startCap.slice(1),
+    ];
+
+    return [...walls, { points: smoothWallPath(dedupeWallPoints(island), true, 1), closed: true }];
+  });
+}
+
+function splitEdgePoints(
+  track: TrackDefinition,
+  module: TrackDefinition["features"]["splitModules"][number],
+  samples: TrackDefinition["samples"],
+  side: -1 | 1,
+): WallPoint[] {
+  void track;
+  const points = samples
+    .filter((sample) => sample.distance >= module.startDistance && sample.distance <= module.endDistance)
+    .map((sample) => wallEdgePoint(sample, side));
+
+  return dedupeWallPoints(points);
+}
+
+function capCurve(from: WallPoint, to: WallPoint): WallPoint[] {
+  const mid = midpoint(from, to);
+
+  return Array.from({ length: 6 }, (_, index) => quadraticPoint(from, mid, to, index / 5));
+}
+
+function quadraticPoint(from: WallPoint, control: WallPoint, to: WallPoint, t: number): WallPoint {
+  const inv = 1 - t;
+
+  return {
+    x: from.x * inv * inv + control.x * 2 * inv * t + to.x * t * t,
+    y: from.y * inv * inv + control.y * 2 * inv * t + to.y * t * t,
+    z: from.z * inv * inv + control.z * 2 * inv * t + to.z * t * t,
+  };
+}
+
+function midpoint(a: WallPoint, b: WallPoint): WallPoint {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+    z: (a.z + b.z) / 2,
+  };
+}
+
+function dedupeWallPoints(points: WallPoint[]): WallPoint[] {
+  return points.filter((point, index) => {
+    if (index === 0) {
+      return true;
+    }
+
+    const previous = points[index - 1];
+    return Math.hypot(point.x - previous.x, point.y - previous.y, point.z - previous.z) > 0.05;
+  });
+}
+
+function smoothWallPath(points: WallPoint[], closed: boolean, iterations: number): WallPoint[] {
+  let smoothed = dedupeWallPoints(points);
+
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    if (smoothed.length < 3) {
+      return smoothed;
+    }
+
+    const next: WallPoint[] = [];
+    const count = smoothed.length;
+    const segmentCount = closed ? count : count - 1;
+
+    if (!closed) {
+      next.push(smoothed[0]);
+    }
+
+    for (let index = 0; index < segmentCount; index += 1) {
+      const a = smoothed[index];
+      const b = smoothed[(index + 1) % count];
+
+      next.push(lerpPoint(a, b, 0.25), lerpPoint(a, b, 0.75));
+    }
+
+    if (!closed) {
+      next.push(smoothed[count - 1]);
+    }
+
+    smoothed = dedupeWallPoints(next);
+  }
+
+  return smoothed;
+}
+
+function lerpPoint(a: WallPoint, b: WallPoint, alpha: number): WallPoint {
+  return {
+    x: a.x + (b.x - a.x) * alpha,
+    y: a.y + (b.y - a.y) * alpha,
+    z: a.z + (b.z - a.z) * alpha,
+  };
+}
+
+function wallEdgePoint(sample: TrackDefinition["samples"][number], side: -1 | 1): WallPoint {
+  const offset = side * ((sample.width ?? TRACK_WIDTH) / 2 - 0.02);
+
+  return {
+    x: sample.x + sample.normal.x * offset,
+    y: sample.y + Math.sin(sample.bank ?? 0) * offset,
+    z: sample.z + sample.normal.z * offset,
+  };
+}
+
 function createSegmentedWalls(
   world: RAPIER.World,
   track: TrackDefinition,
   samples: TrackDefinition["samples"],
   widthScale: number,
+  onlySide?: -1 | 1,
+  applyTrackGaps = true,
+  suppressCoveredEdges = false,
 ): void {
   const step = 1;
 
@@ -445,7 +706,16 @@ function createSegmentedWalls(
     const pitch = Math.atan2(sample.y - next.y, Math.hypot(next.x - sample.x, next.z - sample.z));
 
     for (const side of [-1, 1] as const) {
-      if (isBranchBarrierGap(track, sample.distance, side)) {
+      if (onlySide !== undefined && side !== onlySide) {
+        continue;
+      }
+
+      const segmentDistance = (sample.distance + next.distance) / 2;
+
+      if (
+        (applyTrackGaps && (isSplitWallJunctionGap(track, segmentDistance, side) || isWallSegmentMissing(track, segmentDistance, side))) ||
+        (suppressCoveredEdges && isWallEdgeCoveredByRoad(track, samples, sample, next, side, widthScale))
+      ) {
         continue;
       }
 
@@ -469,11 +739,335 @@ function createSegmentedWalls(
   }
 }
 
+
+type VisualBoundaryWall = { points: WallPoint[]; closed: boolean; outwardSign: 1 | -1 };
+type OffsetNormal = { x: number; z: number };
+
+function createVisualWallColliders(world: RAPIER.World, track: TrackDefinition): void {
+  for (const side of [-1, 1] as const) {
+    createWallMeshCollider(world, createPhysicsThickWall(track.samples, side, 1, track));
+  }
+
+  for (const boundary of splitWallBoundaries(track)) {
+    createWallMeshCollider(world, createPhysicsWallAlongBoundary(boundary.points, boundary.closed, boundary.outwardSign));
+  }
+}
+
+function createWallMeshCollider(world: RAPIER.World, mesh: TrackMeshData): void {
+  if (mesh.vertices.length === 0 || mesh.indices.length === 0) {
+    return;
+  }
+
+  world.createCollider(
+    RAPIER.ColliderDesc.trimesh(mesh.vertices, mesh.indices, RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES)
+      .setFriction(WALL_FRICTION)
+      .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Max)
+      .setRestitution(WALL_RESTITUTION)
+      .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min)
+      .setCollisionGroups(TRACK_COLLISION_GROUPS),
+  );
+}
+
+function createPhysicsThickWall(
+  samples: TrackDefinition["samples"],
+  side: -1 | 1,
+  widthScale: number,
+  track: TrackDefinition,
+): TrackMeshData {
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index];
+    const width = (sample.width ?? TRACK_WIDTH) * widthScale;
+    const innerOffset = side * (width / 2 - 0.02);
+    const outerOffset = innerOffset + side * WALL_VISUAL_THICKNESS;
+    const bankY = Math.sin(sample.bank ?? 0) * innerOffset;
+    const bottomY = sample.y + bankY - WALL_EXTENSION_BELOW;
+    const topY = sample.y + bankY + WALL_HEIGHT_ABOVE;
+
+    positions.push(
+      sample.x + sample.normal.x * innerOffset,
+      bottomY,
+      sample.z + sample.normal.z * innerOffset,
+
+      sample.x + sample.normal.x * innerOffset,
+      topY,
+      sample.z + sample.normal.z * innerOffset,
+
+      sample.x + sample.normal.x * outerOffset,
+      bottomY,
+      sample.z + sample.normal.z * outerOffset,
+
+      sample.x + sample.normal.x * outerOffset,
+      topY,
+      sample.z + sample.normal.z * outerOffset,
+    );
+
+    if (index < samples.length - 1) {
+      const start = index * 4;
+      const next = start + 4;
+      const skipReason = wallSegmentSkipReason(track, samples, index, side, widthScale);
+
+      if (skipReason !== "none") {
+        const previousIsMissing =
+          index > 0 && wallSegmentSkipReason(track, samples, index - 1, side, widthScale) !== "none";
+        const nextIsMissing =
+          index < samples.length - 2 && wallSegmentSkipReason(track, samples, index + 1, side, widthScale) !== "none";
+
+        if (skipReason === "missingWall" && !previousIsMissing) {
+          addPhysicsWallEndCap(indices, start);
+        }
+
+        if (skipReason === "missingWall" && !nextIsMissing) {
+          addPhysicsWallEndCap(indices, next);
+        }
+
+        continue;
+      }
+
+      if (side < 0) {
+        indices.push(
+          start, start + 1, next,
+          start + 1, next + 1, next,
+          start + 2, next + 2, start + 3,
+          start + 3, next + 2, next + 3,
+          start + 1, start + 3, next + 1,
+          start + 3, next + 3, next + 1,
+          start, next, start + 2,
+          start + 2, next, next + 2,
+        );
+      } else {
+        indices.push(
+          start, next, start + 1,
+          start + 1, next, next + 1,
+          start + 2, start + 3, next + 2,
+          start + 3, next + 3, next + 2,
+          start + 1, next + 1, start + 3,
+          start + 3, next + 1, next + 3,
+          start, start + 2, next,
+          start + 2, next + 2, next,
+        );
+      }
+    }
+  }
+
+  return { vertices: new Float32Array(positions), indices: new Uint32Array(indices) };
+}
+
+function wallSegmentSkipReason(
+  track: TrackDefinition,
+  samples: TrackDefinition["samples"],
+  index: number,
+  side: -1 | 1,
+  widthScale: number,
+): "none" | "splitGap" | "missingWall" | "covered" {
+  const sample = samples[index];
+  const next = samples[index + 1];
+  const segmentDistance = (sample.distance + next.distance) / 2;
+
+  if (isSplitWallJunctionGap(track, segmentDistance, side)) {
+    return "splitGap";
+  }
+
+  if (isWallSegmentMissing(track, segmentDistance, side)) {
+    return "missingWall";
+  }
+
+  if (isWallEdgeCoveredByRoad(track, samples, sample, next, side, widthScale)) {
+    return "covered";
+  }
+
+  return "none";
+}
+
+function addPhysicsWallEndCap(indices: number[], offset: number): void {
+  indices.push(offset, offset + 2, offset + 1, offset + 1, offset + 2, offset + 3);
+}
+
+function splitWallBoundaries(track: TrackDefinition): VisualBoundaryWall[] {
+  const walls: VisualBoundaryWall[] = [];
+
+  for (const surface of track.splitSurfaces) {
+    const [leftOuter, rightOuter] = surface.outerBoundaries;
+
+    if (leftOuter?.length >= 2) {
+      walls.push({ points: dedupePhysicsWallPoints(leftOuter), closed: false, outwardSign: -1 });
+    }
+
+    if (rightOuter?.length >= 2) {
+      walls.push({ points: dedupePhysicsWallPoints(rightOuter), closed: false, outwardSign: 1 });
+    }
+
+    if (surface.innerBoundary.length >= 3) {
+      const inner = dedupePhysicsWallPoints(surface.innerBoundary);
+      walls.push({
+        points: inner,
+        closed: true,
+        outwardSign: closedLoopRoadOutwardSign(inner),
+      });
+    }
+  }
+
+  return walls;
+}
+
+function closedLoopRoadOutwardSign(points: WallPoint[]): 1 | -1 {
+  return signedAreaXZ(points) < 0 ? 1 : -1;
+}
+
+function signedAreaXZ(points: WallPoint[]): number {
+  let area = 0;
+
+  for (let index = 0; index < points.length; index += 1) {
+    const current = points[index];
+    const next = points[(index + 1) % points.length];
+    area += current.x * next.z - next.x * current.z;
+  }
+
+  return area / 2;
+}
+
+function createPhysicsWallAlongBoundary(points: WallPoint[], closed: boolean, outwardSign: 1 | -1): TrackMeshData {
+  const cleanPoints = dedupePhysicsWallPoints(points);
+  const count = cleanPoints.length;
+
+  if (count < (closed ? 3 : 2)) {
+    return { vertices: new Float32Array(), indices: new Uint32Array() };
+  }
+
+  const offsetNormals = computePhysicsOffsetNormals(cleanPoints, closed, outwardSign);
+  const positions: number[] = [];
+  const indices: number[] = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const point = cleanPoints[index];
+    const normal = offsetNormals[index];
+    const bottomY = point.y - WALL_EXTENSION_BELOW;
+    const topY = point.y + WALL_HEIGHT_ABOVE;
+    const outerX = point.x + normal.x * WALL_VISUAL_THICKNESS;
+    const outerZ = point.z + normal.z * WALL_VISUAL_THICKNESS;
+
+    positions.push(
+      point.x, bottomY, point.z,
+      point.x, topY, point.z,
+      outerX, bottomY, outerZ,
+      outerX, topY, outerZ,
+    );
+  }
+
+  const segmentCount = closed ? count : count - 1;
+
+  for (let index = 0; index < segmentCount; index += 1) {
+    const nextIndex = (index + 1) % count;
+
+    if (horizontalDistanceXZ(cleanPoints[index], cleanPoints[nextIndex]) < 0.035) {
+      continue;
+    }
+
+    const start = index * 4;
+    const next = nextIndex * 4;
+
+    if (outwardSign < 0) {
+      indices.push(
+        start, start + 1, next,
+        start + 1, next + 1, next,
+        start + 2, next + 2, start + 3,
+        start + 3, next + 2, next + 3,
+        start + 1, start + 3, next + 1,
+        start + 3, next + 3, next + 1,
+        start, next, start + 2,
+        start + 2, next, next + 2,
+      );
+    } else {
+      indices.push(
+        start, next, start + 1,
+        start + 1, next, next + 1,
+        start + 2, start + 3, next + 2,
+        start + 3, next + 3, next + 2,
+        start + 1, next + 1, start + 3,
+        start + 3, next + 1, next + 3,
+        start, start + 2, next,
+        start + 2, next + 2, next,
+      );
+    }
+  }
+
+  return { vertices: new Float32Array(positions), indices: new Uint32Array(indices) };
+}
+
+function horizontalDistanceXZ(a: WallPoint, b: WallPoint): number {
+  return Math.hypot(a.x - b.x, a.z - b.z);
+}
+
+function computePhysicsOffsetNormals(points: WallPoint[], closed: boolean, outwardSign: 1 | -1): OffsetNormal[] {
+  const normals: OffsetNormal[] = [];
+  const count = points.length;
+
+  for (let index = 0; index < count; index += 1) {
+    if (!closed && index === 0) {
+      normals.push(segmentPhysicsOffsetNormal(points[index], points[index + 1], outwardSign));
+      continue;
+    }
+
+    if (!closed && index === count - 1) {
+      normals.push(segmentPhysicsOffsetNormal(points[index - 1], points[index], outwardSign));
+      continue;
+    }
+
+    const previous = points[(index - 1 + count) % count];
+    const current = points[index];
+    const next = points[(index + 1) % count];
+    const beforeNormal = segmentPhysicsOffsetNormal(previous, current, outwardSign);
+    const afterNormal = segmentPhysicsOffsetNormal(current, next, outwardSign);
+    let mx = beforeNormal.x + afterNormal.x;
+    let mz = beforeNormal.z + afterNormal.z;
+    const length = Math.hypot(mx, mz);
+
+    if (length < 0.0001) {
+      normals.push(afterNormal);
+      continue;
+    }
+
+    mx /= length;
+    mz /= length;
+
+    const dot = Math.max(0.58, mx * afterNormal.x + mz * afterNormal.z);
+    const scale = Math.min(1.22, 1 / dot);
+
+    normals.push({ x: mx * scale, z: mz * scale });
+  }
+
+  return normals;
+}
+
+function segmentPhysicsOffsetNormal(a: WallPoint, b: WallPoint, outwardSign: 1 | -1): OffsetNormal {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const length = Math.hypot(dx, dz) || 1;
+
+  return {
+    x: outwardSign * (dz / length),
+    z: outwardSign * (-dx / length),
+  };
+}
+
+function dedupePhysicsWallPoints(points: WallPoint[]): WallPoint[] {
+  return points.filter((point, index) => {
+    if (index === 0) {
+      return true;
+    }
+
+    const previous = points[index - 1];
+    return Math.hypot(point.x - previous.x, point.y - previous.y, point.z - previous.z) > 0.05;
+  });
+}
+
 function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Array<MovingVerticalObstacle | DynamicBody> {
   const dynamicBodies: Array<MovingVerticalObstacle | DynamicBody> = [];
 
   for (const [index, peg] of track.features.pegs.entries()) {
-    const sample = sampleAtDistance(track.samples, peg.distance);
+    const sample = featureSampleAtDistance(track, peg.distance, index);
     const maxOffset = Math.max(0.25, (sample.width ?? TRACK_WIDTH) / 2 - 1.05);
     const offset = clamp(peg.offset, -maxOffset, maxOffset);
     const transform = surfaceTransform(sample, offset, PEG_HEIGHT, pegExtensionAtTime(0, peg.phase));
@@ -505,7 +1099,7 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, bumper] of track.features.greenBumpers.entries()) {
-    const sample = sampleAtDistance(track.samples, bumper.distance);
+    const sample = featureSampleAtDistance(track, bumper.distance, index);
     const phase = greenBumperRuntimePhase(bumper, index);
     const transform = surfaceTransform(sample, bumper.offset, BUMPER_HEIGHT, pegExtensionAtTime(0, phase));
 
@@ -536,7 +1130,7 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, gate] of track.features.gates.entries()) {
-    const sample = sampleAtDistance(track.samples, gate.distance);
+    const sample = featureSampleAtDistance(track, gate.distance, index);
     const transform = surfaceTransform(sample, 0, GATE_HEIGHT, 1);
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased()
@@ -570,7 +1164,7 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [trapperIndex, trapper] of track.features.trappers.entries()) {
-    const sample = sampleAtDistance(track.samples, trapper.distance);
+    const sample = featureSampleAtDistance(track, trapper.distance, trapperIndex);
     const transform = surfaceTransform(sample, 0, TRAPPER_HEIGHT, 1);
     const segmentCount = 10;
     const ringRadius = Math.min(trapper.radius, Math.max(0.65, (sample.width ?? TRACK_WIDTH) / 2 - 0.55));
@@ -611,7 +1205,7 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, spinner] of track.features.spinners.entries()) {
-    const sample = sampleAtDistance(track.samples, spinner.distance);
+    const sample = featureSampleAtDistance(track, spinner.distance, index);
     const transform = surfaceTransform(sample, 0, SPINNER_HEIGHT, 1);
     transform.y += SPINNER_TRACK_LIFT;
     const body = world.createRigidBody(
@@ -646,7 +1240,7 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, hammer] of track.features.hammers.entries()) {
-    const sample = sampleAtDistance(track.samples, hammer.distance);
+    const sample = featureSampleAtDistance(track, hammer.distance, index);
     const transform = surfaceTransform(sample, 0, HAMMER_HEIGHT, 1);
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased()
@@ -679,7 +1273,7 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, turnstile] of track.features.turnstiles.entries()) {
-    const sample = sampleAtDistance(track.samples, turnstile.distance);
+    const sample = featureSampleAtDistance(track, turnstile.distance, index);
     const transform = surfaceTransform(sample, 0, TURNSTILE_HEIGHT, 1);
     transform.y += TURNSTILE_TRACK_LIFT;
     const body = world.createRigidBody(
@@ -821,12 +1415,12 @@ function updatePowerups(
   activePowerupsByBall: Map<string, ActivePowerup[]>,
   time: number,
 ): void {
-  for (const powerup of track.features.powerups) {
+  for (const [powerupIndex, powerup] of track.features.powerups.entries()) {
     if ((hiddenPowerupsUntil.get(powerup.id) ?? 0) > time) {
       continue;
     }
 
-    const sample = sampleAtDistance(track.samples, powerup.distance);
+    const sample = featureSampleAtDistance(track, powerup.distance, powerupIndex);
     const powerupPosition = {
       x: sample.x + sample.normal.x * powerup.offset,
       y: surfaceYAtOffset(sample, powerup.offset) + 0.46,
@@ -1359,6 +1953,22 @@ function surfaceYAtOffset(sample: TrackDefinition["samples"][number], offset: nu
   return sample.y + Math.sin(sample.bank ?? 0) * offset;
 }
 
+function featureSampleAtDistance(
+  track: TrackDefinition,
+  distance: number,
+  featureIndex: number,
+): TrackDefinition["samples"][number] {
+  const branchCandidates = track.branches.filter(
+    (branch) => distance >= branch.startDistance && distance <= branch.endDistance,
+  );
+
+  if (branchCandidates.length === 0) {
+    return sampleAtDistance(track.samples, distance);
+  }
+
+  return sampleAtDistance(branchCandidates[featureIndex % branchCandidates.length].samples, distance);
+}
+
 function verticalObstacleCenterY(trackY: number, fullHeight: number, extension: number): number {
   const clampedExtension = Math.max(0.04, extension);
   const visibleCenter = trackY + SURFACE_CLEARANCE + fullHeight / 2;
@@ -1383,11 +1993,78 @@ function surfaceTransform(
   };
 }
 
-function isBranchBarrierGap(track: TrackDefinition, distance: number, side: -1 | 1): boolean {
+function isSplitWallJunctionGap(track: TrackDefinition, distance: number, side: -1 | 1): boolean {
+  void side;
+
+  return track.splitSurfaces.some(
+    (surface) => distance >= surface.startDistance && distance <= surface.endDistance,
+  );
+}
+
+function isWallSegmentMissing(track: TrackDefinition, distance: number, side: -1 | 1): boolean {
+  return track.features.missingWallSegments.some(
+    (segment) =>
+      segment.side === side &&
+      Math.abs(distance - segment.distance) <= segment.length / 2,
+  );
+}
+
+function isWallEdgeCoveredByRoad(
+  track: TrackDefinition,
+  ownSamples: TrackDefinition["samples"],
+  sample: TrackDefinition["samples"][number],
+  next: TrackDefinition["samples"][number],
+  side: -1 | 1,
+  widthScale: number,
+): boolean {
+  const distance = (sample.distance + next.distance) / 2;
+  const width = (((sample.width ?? TRACK_WIDTH) + (next.width ?? TRACK_WIDTH)) / 2) * widthScale;
+  const edgeOffset = side * (width / 2 - 0.02);
+  const bank = ((sample.bank ?? 0) + (next.bank ?? 0)) / 2;
+  const midpoint = {
+    x: (sample.x + next.x) / 2 + ((sample.normal.x + next.normal.x) / 2) * edgeOffset,
+    y: (sample.y + next.y) / 2 + Math.sin(bank) * edgeOffset,
+    z: (sample.z + next.z) / 2 + ((sample.normal.z + next.normal.z) / 2) * edgeOffset,
+  };
+
+  for (const routeSamples of roadSurfaceRoutes(track)) {
+    if (routeSamples === ownSamples || !isRoadSurfaceActive(track, routeSamples, distance)) {
+      continue;
+    }
+
+    const roadSample = sampleAtDistance(routeSamples, distance);
+    const dx = midpoint.x - roadSample.x;
+    const dz = midpoint.z - roadSample.z;
+    const lateral = Math.abs(dx * roadSample.normal.x + dz * roadSample.normal.z);
+    const horizontal = Math.hypot(dx, dz);
+    const vertical = Math.abs(midpoint.y - (roadSample.y + Math.sin(roadSample.bank ?? 0) * lateral));
+    const roadHalfWidth = (roadSample.width ?? TRACK_WIDTH) / 2;
+
+    if (lateral <= roadHalfWidth - 0.08 && horizontal <= roadHalfWidth + 0.75 && vertical <= 0.9) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function roadSurfaceRoutes(track: TrackDefinition): Array<TrackDefinition["samples"]> {
+  return [track.samples, ...track.branches.map((branch) => branch.samples)];
+}
+
+function isRoadSurfaceActive(
+  track: TrackDefinition,
+  samples: TrackDefinition["samples"],
+  distance: number,
+): boolean {
+  if (samples === track.samples) {
+    return !track.splitSurfaces.some(
+      (surface) => distance > surface.startDistance && distance < surface.endDistance,
+    );
+  }
+
   return track.branches.some(
-    (branch) =>
-      branch.side === side &&
-      (Math.abs(distance - branch.startDistance) < 3.5 || Math.abs(distance - branch.endDistance) < 3.5),
+    (branch) => branch.samples === samples && distance >= branch.startDistance && distance <= branch.endDistance,
   );
 }
 

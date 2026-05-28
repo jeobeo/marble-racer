@@ -14,16 +14,7 @@ const DEFAULT_OPTIONS: PickerOption[] = [
 const MAX_RACE_BALLS = 50;
 const PREVIEW_BALL_COLOR = "#8d96a3";
 const PREVIEW_BALL_LABEL = "";
-const MUSIC_TRACKS = [
-  "/music/Fast%20is%20fast.wav",
-  "/music/Hot%20Rod%20Hot.wav",
-  "/music/Infinity.wav",
-  "/music/Night%20Rockus.wav",
-  "/music/No%20shortcut%20.wav",
-  "/music/Panama.wav",
-  "/music/Racing%20Sample%20TRACK.wav",
-  "/music/Trigger.wav",
-];
+const MUSIC_MANIFEST_URL = "/music/manifest.json";
 const SESSION_STORAGE_KEY = "marble-race-picker:current";
 const SAVED_SETUPS_STORAGE_KEY = "marble-race-picker:saved-setups";
 const STANDINGS_UPDATE_SECONDS = 0.2;
@@ -44,6 +35,7 @@ export class RaceController {
   private readonly ui: ControlsUi;
   private readonly renderer: LiveRenderer;
   private readonly raceAudio = new Audio();
+  private readonly musicTracksReady: Promise<void>;
 
   private options = DEFAULT_OPTIONS;
   private mapSeed = createSeed();
@@ -51,6 +43,7 @@ export class RaceController {
   private obstacleRuntimeSeed = createSeed();
   private runtimeTrack = this.createPreviewTrack();
   private musicVolume = 0.5;
+  private musicTracks: string[] = [];
   private savedSetups: SavedSetup[] = [];
   private selectedSetupId = "";
   private setupName = "";
@@ -66,6 +59,7 @@ export class RaceController {
   constructor(config: RaceControllerConfig) {
     this.raceAudio.loop = true;
     this.raceAudio.preload = "auto";
+    this.musicTracksReady = this.loadMusicTracks();
 
     this.ui = new ControlsUi(config.controlsRoot, {
       onStateChange: (state) => this.applyState(state),
@@ -260,7 +254,7 @@ export class RaceController {
 
       this.busy = false;
       this.ui.setRuntimeState(this.renderState(false));
-      this.playRaceAudioFromStart();
+      void this.playRaceAudioFromStart();
       this.startLiveLoop(liveRace);
     } catch (error) {
       this.busy = false;
@@ -336,8 +330,14 @@ export class RaceController {
     this.stopRaceAudio(true);
   }
 
-  private playRaceAudioFromStart(): void {
+  private async playRaceAudioFromStart(): Promise<void> {
     this.stopRaceAudio(true);
+    await this.musicTracksReady;
+
+    if (!this.liveRace) {
+      return;
+    }
+
     const nextTrack = this.pickRaceAudioUrl();
 
     if (!nextTrack) {
@@ -486,8 +486,26 @@ export class RaceController {
   }
 
   private pickRaceAudioUrl(): string {
-    const tracks = MUSIC_TRACKS.length > 0 ? MUSIC_TRACKS : [];
+    const tracks = this.musicTracks;
     return tracks[Math.floor(Math.random() * tracks.length)] ?? "";
+  }
+
+  private async loadMusicTracks(): Promise<void> {
+    try {
+      const response = await fetch(MUSIC_MANIFEST_URL, { cache: "no-store" });
+
+      if (!response.ok) {
+        return;
+      }
+
+      const manifest: unknown = await response.json();
+      this.musicTracks = Array.isArray(manifest)
+        ? manifest.filter((track): track is string => typeof track === "string" && /^\/music\/.+\.(mp3|wav)$/i.test(track))
+        : [];
+    } catch (error) {
+      console.warn("Music track manifest could not be loaded.", error);
+      this.musicTracks = [];
+    }
   }
 
   private serializedSetup(): ControlsState {
