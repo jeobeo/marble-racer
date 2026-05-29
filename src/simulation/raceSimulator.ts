@@ -45,6 +45,7 @@ const FALL_DISQUALIFY_DROP = 8.0;
 const FALL_LATERAL_DISTANCE_SCALE = 1.8;
 const FALL_LATERAL_DISTANCE_EXTRA = 1.2;
 const HARD_FALL_Y = -35;
+const SAFE_CHECKPOINT_MAX_ADVANCE_PER_UPDATE = 7.5;
 
 const PEG_MOTION_PERIOD = 8;
 const PEG_HOLD_UP_SECONDS = 2;
@@ -60,8 +61,20 @@ const TURNSTILE_PHASE_PERIOD = Math.PI * 2;
 const AIRBORNE_DISPLAY_MAX_VERTICAL_DISTANCE = 8.5;
 const AIRBORNE_DISPLAY_MAX_LATERAL_DISTANCE = TRACK_WIDTH * 1.35;
 const AIRBORNE_DISPLAY_MAX_BELOW_COURSE = 2.2;
-const AIRBORNE_DISPLAY_MAX_PROGRESS_ADVANCE_PER_STEP = 1.35;
-const AIRBORNE_DISPLAY_MAX_PROGRESS_BACKTRACK_PER_STEP = 3.5;
+const AIRBORNE_DISPLAY_MAX_PROGRESS_ADVANCE_PER_STEP = 2.75;
+const AIRBORNE_DISPLAY_MAX_PROGRESS_BACKTRACK_PER_STEP = 5.0;
+
+// Prevent true lower-track shortcuts without treating ordinary airtime as a cheat.
+// A reset is only queued when the ball had a real airborne gap, then lands much
+// lower and much farther ahead than its last confirmed safe contact checkpoint.
+// Display progress can temporarily freeze during uncertain airtime, but landing
+// alone is not enough to trigger a respawn.
+const GROUNDED_DISPLAY_MAX_PROGRESS_ADVANCE_PER_STEP = 5.2;
+const GROUNDED_DISPLAY_MAX_PROGRESS_BACKTRACK_PER_STEP = 7.5;
+const ILLEGAL_SHORTCUT_MIN_AIRTIME_SECONDS = 0.62;
+const ILLEGAL_SHORTCUT_MIN_PROGRESS_GAIN = 28.0;
+const ILLEGAL_SHORTCUT_MIN_VERTICAL_DROP = 5.4;
+const ILLEGAL_SHORTCUT_MIN_HORIZONTAL_SEPARATION = 9.0;
 
 const GRAVITY_Y = -11.5;
 
@@ -73,9 +86,20 @@ const SAFETY_SLAB_RESTITUTION = 0.015;
 
 const WALL_FRICTION = 0.34;
 const WALL_RESTITUTION = 0.08;
-const WALL_HALF_THICKNESS = 0.34;
-const WALL_HALF_HEIGHT = 1.05;
-const WALL_LENGTH_OVERLAP = 0.52;
+const WALL_HALF_THICKNESS = 0.26;
+const WALL_HALF_HEIGHT = 1.02;
+const WALL_LENGTH_OVERLAP = 0.08;
+const WALL_ROAD_EDGE_OVERLAP = 0.0;
+
+// Extra invisible guard rails are intentionally thicker than the visual wall.
+// They are a physics-only containment layer used to close edge/trimesh seams,
+// especially on narrowed sections and fork/merge boundaries where the ball can
+// otherwise squeeze through a tiny gap between wall mesh triangles.
+const GUARD_RAIL_HALF_THICKNESS = 0.48;
+const GUARD_RAIL_HALF_HEIGHT = 1.55;
+const GUARD_RAIL_LENGTH_OVERLAP = 0.86;
+const GUARD_RAIL_CENTER_LIFT = 0.9;
+const GUARD_RAIL_EDGE_OVERLAP = 0.12;
 
 // Keep physics wall dimensions in lockstep with src/rendering/trackMeshes.ts.
 // Wall colliders below are now generated from the same edge-anchored mesh logic
@@ -148,6 +172,8 @@ type ActivePowerup = {
 type SafeBallState = {
   position: { x: number; y: number; z: number };
   progress: number;
+  yaw: number;
+  tangent: { x: number; y: number; z: number };
 };
 
 type PendingRespawn = {
@@ -187,6 +213,8 @@ type DynamicBody = {
   speed: number;
 };
 
+const routeSamplesByTrack = new WeakMap<TrackDefinition, TrackDefinition["samples"]>();
+
 export async function prepareRapier(): Promise<void> {
   await Promise.resolve();
 }
@@ -209,6 +237,10 @@ export function createLiveRace(config: RaceConfig): LiveRaceSimulation {
   const smashedObstacleBodies = new Set<number>();
   const destroyedObstacleIds = new Set<string>();
   const obstacleBodyByCollider = createObstacleColliderMap(dynamic);
+
+  for (const ball of balls) {
+    safeStateByBall.set(ball.id, safeStateForProgress(track, 0.4, ball.radius));
+  }
 
   updateBallFrameStates(world, balls, track, displayProgressByBall, frameStateByBall, activePowerupsByBall, 0);
 
@@ -272,6 +304,7 @@ export function createLiveRace(config: RaceConfig): LiveRaceSimulation {
           pendingRespawnsByBall,
           track,
           frameStateByBall,
+          displayProgressByBall,
           elapsed,
           FIXED_TIMESTEP,
         );
@@ -389,6 +422,12 @@ function createTrack(world: RAPIER.World, track: TrackDefinition): Array<MovingV
 
   for (const surface of track.splitSurfaces) {
     createRoadCollider(world, surface.road);
+
+    // Rapier trimesh colliders can have edge/backface tunneling on the very thin
+    // split-road replacement mesh. Add route-local slab colliders under each
+    // rendered split lane so physics support matches the visible road surface.
+    createRoadSafetySlabs(world, splitSurfaceLaneSamples(surface, -1));
+    createRoadSafetySlabs(world, splitSurfaceLaneSamples(surface, 1));
   }
 
   createVisualWallColliders(world, track);
@@ -432,10 +471,10 @@ function createRoadSafetySlabs(
     const pitch = Math.atan2(sample.y - next.y, Math.hypot(next.x - sample.x, next.z - sample.z));
 
     const collider = world.createCollider(
-      RAPIER.ColliderDesc.cuboid(width / 2, 0.16, length / 2 + 0.22)
+      RAPIER.ColliderDesc.cuboid(Math.max(0.1, width / 2 - 0.06), 0.1, length / 2 + 0.06)
         .setTranslation(
           (sample.x + next.x) / 2,
-          (sample.y + next.y) / 2 - 0.12,
+          (sample.y + next.y) / 2 - 0.2,
           (sample.z + next.z) / 2,
         )
         .setRotation(trackRotation(yaw, pitch))
@@ -713,7 +752,7 @@ function createSegmentedWalls(
       const segmentDistance = (sample.distance + next.distance) / 2;
 
       if (
-        (applyTrackGaps && (isSplitWallJunctionGap(track, segmentDistance, side) || isWallSegmentMissing(track, segmentDistance, side))) ||
+        (applyTrackGaps && isSplitWallJunctionGap(track, segmentDistance, side)) ||
         (suppressCoveredEdges && isWallEdgeCoveredByRoad(track, samples, sample, next, side, widthScale))
       ) {
         continue;
@@ -724,9 +763,9 @@ function createSegmentedWalls(
       world.createCollider(
         RAPIER.ColliderDesc.cuboid(WALL_HALF_THICKNESS, WALL_HALF_HEIGHT, length / 2 + WALL_LENGTH_OVERLAP)
           .setTranslation(
-            (sample.x + next.x) / 2 + normal.x * side * (width / 2 + 0.01),
+            (sample.x + next.x) / 2 + normal.x * side * (width / 2 - WALL_ROAD_EDGE_OVERLAP),
             (sample.y + next.y) / 2 + 0.62,
-            (sample.z + next.z) / 2 + normal.z * side * (width / 2 + 0.01),
+            (sample.z + next.z) / 2 + normal.z * side * (width / 2 - WALL_ROAD_EDGE_OVERLAP),
           )
           .setRotation(trackRotation(yaw, pitch))
           .setFriction(WALL_FRICTION)
@@ -744,12 +783,134 @@ type VisualBoundaryWall = { points: WallPoint[]; closed: boolean; outwardSign: 1
 type OffsetNormal = { x: number; z: number };
 
 function createVisualWallColliders(world: RAPIER.World, track: TrackDefinition): void {
+  // Wall collision should match the rendered wall, not a wider invisible guard rail.
+  // The previous cuboid rail layers made wall collision feel too large, and the
+  // old physics mesh also skipped some wall segments when another road was nearby.
+  // Use the exact edge-anchored visual wall meshes here and only omit main-wall
+  // segments inside rendered split replacement gaps.
   for (const side of [-1, 1] as const) {
     createWallMeshCollider(world, createPhysicsThickWall(track.samples, side, 1, track));
   }
 
   for (const boundary of splitWallBoundaries(track)) {
     createWallMeshCollider(world, createPhysicsWallAlongBoundary(boundary.points, boundary.closed, boundary.outwardSign));
+  }
+}
+
+
+function createGuardRailColliders(world: RAPIER.World, track: TrackDefinition): void {
+  const splitRoadGaps = track.splitSurfaces.map(({ startDistance, endDistance }) => ({ startDistance, endDistance }));
+
+  // Main-route rails: unlike the visual wall mesh, these are simple overlapping
+  // cuboids at the actual road edge and are not suppressed by nearby route-cover
+  // heuristics. They only skip rendered split replacement gaps.
+  createGuardRailsForSamples(world, track.samples, splitRoadGaps);
+
+  // Split-route rails: use the exact split-surface wall boundaries that the
+  // renderer uses. These close seams at the outer split walls and island wall.
+  for (const boundary of splitWallBoundaries(track)) {
+    createBoundaryGuardRailColliders(world, boundary.points, boundary.closed);
+  }
+}
+
+function createGuardRailsForSamples(
+  world: RAPIER.World,
+  samples: TrackDefinition["samples"],
+  gaps: Array<{ startDistance: number; endDistance: number }> = [],
+): void {
+  const step = 1;
+
+  for (let index = 0; index < samples.length - step; index += step) {
+    const sample = samples[index];
+    const next = samples[index + step];
+    const segmentDistance = (sample.distance + next.distance) / 2;
+
+    if (isRoadSegmentGap(segmentDistance, gaps)) {
+      continue;
+    }
+
+    const width = ((sample.width ?? TRACK_WIDTH) + (next.width ?? TRACK_WIDTH)) / 2;
+    const dx = next.x - sample.x;
+    const dy = next.y - sample.y;
+    const dz = next.z - sample.z;
+    const length = Math.hypot(dx, dy, dz);
+
+    if (length < 0.035) {
+      continue;
+    }
+
+    const yaw = Math.atan2(dx, dz);
+    const pitch = Math.atan2(sample.y - next.y, Math.hypot(dx, dz));
+    const normal = normalizeXZ({
+      x: sample.normal.x + next.normal.x,
+      z: sample.normal.z + next.normal.z,
+    });
+
+    for (const side of [-1, 1] as const) {
+      const edgeOffset = side * (width / 2 - GUARD_RAIL_EDGE_OVERLAP);
+      const centerX = (sample.x + next.x) / 2 + normal.x * edgeOffset;
+      const centerY = (sample.y + next.y) / 2 + GUARD_RAIL_CENTER_LIFT;
+      const centerZ = (sample.z + next.z) / 2 + normal.z * edgeOffset;
+
+      world.createCollider(
+        RAPIER.ColliderDesc.cuboid(
+          GUARD_RAIL_HALF_THICKNESS,
+          GUARD_RAIL_HALF_HEIGHT,
+          length / 2 + GUARD_RAIL_LENGTH_OVERLAP,
+        )
+          .setTranslation(centerX, centerY, centerZ)
+          .setRotation(trackRotation(yaw, pitch))
+          .setFriction(WALL_FRICTION)
+          .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Max)
+          .setRestitution(WALL_RESTITUTION)
+          .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min)
+          .setCollisionGroups(TRACK_COLLISION_GROUPS),
+      );
+    }
+  }
+}
+
+function createBoundaryGuardRailColliders(world: RAPIER.World, points: WallPoint[], closed: boolean): void {
+  const cleanPoints = dedupePhysicsWallPoints(points);
+  const segmentCount = closed ? cleanPoints.length : cleanPoints.length - 1;
+
+  if (segmentCount < 1) {
+    return;
+  }
+
+  for (let index = 0; index < segmentCount; index += 1) {
+    const current = cleanPoints[index];
+    const next = cleanPoints[(index + 1) % cleanPoints.length];
+    const dx = next.x - current.x;
+    const dy = next.y - current.y;
+    const dz = next.z - current.z;
+    const length = Math.hypot(dx, dy, dz);
+
+    if (length < 0.035) {
+      continue;
+    }
+
+    const yaw = Math.atan2(dx, dz);
+    const pitch = Math.atan2(current.y - next.y, Math.hypot(dx, dz));
+
+    world.createCollider(
+      RAPIER.ColliderDesc.cuboid(
+        GUARD_RAIL_HALF_THICKNESS,
+        GUARD_RAIL_HALF_HEIGHT,
+        length / 2 + GUARD_RAIL_LENGTH_OVERLAP,
+      )
+        .setTranslation(
+          (current.x + next.x) / 2,
+          (current.y + next.y) / 2 + GUARD_RAIL_CENTER_LIFT,
+          (current.z + next.z) / 2,
+        )
+        .setRotation(trackRotation(yaw, pitch))
+        .setFriction(WALL_FRICTION)
+        .setFrictionCombineRule(RAPIER.CoefficientCombineRule.Max)
+        .setRestitution(WALL_RESTITUTION)
+        .setRestitutionCombineRule(RAPIER.CoefficientCombineRule.Min)
+        .setCollisionGroups(TRACK_COLLISION_GROUPS),
+    );
   }
 }
 
@@ -810,19 +971,6 @@ function createPhysicsThickWall(
       const skipReason = wallSegmentSkipReason(track, samples, index, side, widthScale);
 
       if (skipReason !== "none") {
-        const previousIsMissing =
-          index > 0 && wallSegmentSkipReason(track, samples, index - 1, side, widthScale) !== "none";
-        const nextIsMissing =
-          index < samples.length - 2 && wallSegmentSkipReason(track, samples, index + 1, side, widthScale) !== "none";
-
-        if (skipReason === "missingWall" && !previousIsMissing) {
-          addPhysicsWallEndCap(indices, start);
-        }
-
-        if (skipReason === "missingWall" && !nextIsMissing) {
-          addPhysicsWallEndCap(indices, next);
-        }
-
         continue;
       }
 
@@ -861,21 +1009,15 @@ function wallSegmentSkipReason(
   index: number,
   side: -1 | 1,
   widthScale: number,
-): "none" | "splitGap" | "missingWall" | "covered" {
+): "none" | "splitGap" {
+  void samples;
+  void widthScale;
   const sample = samples[index];
   const next = samples[index + 1];
   const segmentDistance = (sample.distance + next.distance) / 2;
 
   if (isSplitWallJunctionGap(track, segmentDistance, side)) {
     return "splitGap";
-  }
-
-  if (isWallSegmentMissing(track, segmentDistance, side)) {
-    return "missingWall";
-  }
-
-  if (isWallEdgeCoveredByRoad(track, samples, sample, next, side, widthScale)) {
-    return "covered";
   }
 
   return "none";
@@ -1067,9 +1209,9 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   const dynamicBodies: Array<MovingVerticalObstacle | DynamicBody> = [];
 
   for (const [index, peg] of track.features.pegs.entries()) {
-    const sample = featureSampleAtDistance(track, peg.distance, index);
+    const sample = featureSampleForFeature(track, peg);
     const maxOffset = Math.max(0.25, (sample.width ?? TRACK_WIDTH) / 2 - 1.05);
-    const offset = clamp(peg.offset, -maxOffset, maxOffset);
+    const offset = clamp(featureRenderOffset(peg), -maxOffset, maxOffset);
     const transform = surfaceTransform(sample, offset, PEG_HEIGHT, pegExtensionAtTime(0, peg.phase));
 
     const body = world.createRigidBody(
@@ -1099,9 +1241,9 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, bumper] of track.features.greenBumpers.entries()) {
-    const sample = featureSampleAtDistance(track, bumper.distance, index);
+    const sample = featureSampleForFeature(track, bumper);
     const phase = greenBumperRuntimePhase(bumper, index);
-    const transform = surfaceTransform(sample, bumper.offset, BUMPER_HEIGHT, pegExtensionAtTime(0, phase));
+    const transform = surfaceTransform(sample, featureRenderOffset(bumper), BUMPER_HEIGHT, pegExtensionAtTime(0, phase));
 
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(transform.x, transform.y, transform.z),
@@ -1130,8 +1272,8 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, gate] of track.features.gates.entries()) {
-    const sample = featureSampleAtDistance(track, gate.distance, index);
-    const transform = surfaceTransform(sample, 0, GATE_HEIGHT, 1);
+    const sample = featureSampleForFeature(track, gate);
+    const transform = surfaceTransform(sample, featureRenderOffset(gate), GATE_HEIGHT, 1);
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased()
         .setTranslation(transform.x, transform.y, transform.z)
@@ -1164,8 +1306,8 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [trapperIndex, trapper] of track.features.trappers.entries()) {
-    const sample = featureSampleAtDistance(track, trapper.distance, trapperIndex);
-    const transform = surfaceTransform(sample, 0, TRAPPER_HEIGHT, 1);
+    const sample = featureSampleForFeature(track, trapper);
+    const transform = surfaceTransform(sample, featureRenderOffset(trapper), TRAPPER_HEIGHT, 1);
     const segmentCount = 10;
     const ringRadius = Math.min(trapper.radius, Math.max(0.65, (sample.width ?? TRACK_WIDTH) / 2 - 0.55));
 
@@ -1205,8 +1347,8 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, spinner] of track.features.spinners.entries()) {
-    const sample = featureSampleAtDistance(track, spinner.distance, index);
-    const transform = surfaceTransform(sample, 0, SPINNER_HEIGHT, 1);
+    const sample = featureSampleForFeature(track, spinner);
+    const transform = surfaceTransform(sample, featureRenderOffset(spinner), SPINNER_HEIGHT, 1);
     transform.y += SPINNER_TRACK_LIFT;
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased()
@@ -1240,8 +1382,8 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, hammer] of track.features.hammers.entries()) {
-    const sample = featureSampleAtDistance(track, hammer.distance, index);
-    const transform = surfaceTransform(sample, 0, HAMMER_HEIGHT, 1);
+    const sample = featureSampleForFeature(track, hammer);
+    const transform = surfaceTransform(sample, featureRenderOffset(hammer), HAMMER_HEIGHT, 1);
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased()
         .setTranslation(transform.x, transform.y, transform.z)
@@ -1273,8 +1415,8 @@ function createFeatureColliders(world: RAPIER.World, track: TrackDefinition): Ar
   }
 
   for (const [index, turnstile] of track.features.turnstiles.entries()) {
-    const sample = featureSampleAtDistance(track, turnstile.distance, index);
-    const transform = surfaceTransform(sample, 0, TURNSTILE_HEIGHT, 1);
+    const sample = featureSampleForFeature(track, turnstile);
+    const transform = surfaceTransform(sample, featureRenderOffset(turnstile), TURNSTILE_HEIGHT, 1);
     transform.y += TURNSTILE_TRACK_LIFT;
     const body = world.createRigidBody(
       RAPIER.RigidBodyDesc.kinematicPositionBased()
@@ -1375,15 +1517,19 @@ function updateBallFrameStates(
     const hasContact = ballHasAnyContact(world, ball);
     const previousDisplayProgress = displayProgressByBall.get(ball.id);
 
+    const progressStepIsPlausible = hasContact
+      ? isGroundedProgressStepPlausible(physicalProgress, previousDisplayProgress)
+      : isAirborneProgressStepPlausible(physicalProgress, previousDisplayProgress);
     const isRaceProgressCredible =
-      hasContact ||
-      isPlausibleAirborneRacePosition(
-        track,
-        position,
-        physicalProgress,
-        trackStatus,
-        previousDisplayProgress,
-      );
+      progressStepIsPlausible &&
+      (hasContact ||
+        isPlausibleAirborneRacePosition(
+          track,
+          position,
+          physicalProgress,
+          trackStatus,
+          previousDisplayProgress,
+        ));
 
     const displayProgress = isRaceProgressCredible
       ? physicalProgress
@@ -1420,15 +1566,19 @@ function updatePowerups(
       continue;
     }
 
-    const sample = featureSampleAtDistance(track, powerup.distance, powerupIndex);
+    const sample = featureSampleForFeature(track, powerup);
     const powerupPosition = {
-      x: sample.x + sample.normal.x * powerup.offset,
-      y: surfaceYAtOffset(sample, powerup.offset) + 0.46,
-      z: sample.z + sample.normal.z * powerup.offset,
+      x: sample.x + sample.normal.x * featureRenderOffset(powerup),
+      y: surfaceYAtOffset(sample, featureRenderOffset(powerup)) + 0.46,
+      z: sample.z + sample.normal.z * featureRenderOffset(powerup),
     };
     const collector = balls.find((ball) => {
       const position = ball.body.translation();
-      return Math.hypot(position.x - powerupPosition.x, position.y - powerupPosition.y, position.z - powerupPosition.z) < POWERUP_PICKUP_RADIUS + ball.radius;
+      const pickupDistance = POWERUP_PICKUP_RADIUS + ball.radius;
+      const dx = position.x - powerupPosition.x;
+      const dy = position.y - powerupPosition.y;
+      const dz = position.z - powerupPosition.z;
+      return dx * dx + dy * dy + dz * dz < pickupDistance * pickupDistance;
     });
 
     if (!collector) {
@@ -1436,6 +1586,9 @@ function updatePowerups(
     }
 
     hiddenPowerupsUntil.set(powerup.id, time + POWERUP_RESPAWN_SECONDS);
+    // Runtime powerups are intentionally non-deterministic: the pickup grants a
+    // fresh random effect every time this pickup is collected, including after
+    // respawn. The generated powerup.kind is only a legacy/default field.
     addActivePowerup(world, balls, collector, randomPowerupKind(), activePowerupsByBall, time);
   }
 }
@@ -1690,6 +1843,19 @@ function isAirborneProgressStepPlausible(progress: number, previousDisplayProgre
   );
 }
 
+function isGroundedProgressStepPlausible(progress: number, previousDisplayProgress?: number): boolean {
+  if (previousDisplayProgress === undefined) {
+    return true;
+  }
+
+  const delta = progress - previousDisplayProgress;
+
+  return (
+    delta <= GROUNDED_DISPLAY_MAX_PROGRESS_ADVANCE_PER_STEP &&
+    delta >= -GROUNDED_DISPLAY_MAX_PROGRESS_BACKTRACK_PER_STEP
+  );
+}
+
 function isValidFinishCrossing(
   track: TrackDefinition,
   position: { x: number; y: number; z: number },
@@ -1727,6 +1893,7 @@ function updateFallRespawns(
   pendingRespawnsByBall: Map<string, PendingRespawn>,
   track: TrackDefinition,
   frameStateByBall: Map<string, BallFrameState>,
+  displayProgressByBall: Map<string, number>,
   time: number,
   deltaSeconds: number,
 ): void {
@@ -1739,6 +1906,7 @@ function updateFallRespawns(
     const position = ball.body.translation();
     const frameState = frameStateByBall.get(ball.id);
     const hasContact = frameState?.hasContact ?? false;
+    const trackStatus = trackDistanceForPosition(track, position);
     const pendingRespawn = pendingRespawnsByBall.get(ball.id);
 
     if (pendingRespawn) {
@@ -1754,10 +1922,49 @@ function updateFallRespawns(
       continue;
     }
 
+    const airborneSecondsBeforeContact = noContactSecondsByBall.get(ball.id) ?? 0;
+
+    if (
+      hasContact &&
+      frameState &&
+      isIllegalShortcutLanding(
+        frameState,
+        safeStateByBall.get(ball.id),
+        position,
+        trackStatus,
+        airborneSecondsBeforeContact,
+      )
+    ) {
+      queueBallRespawn(ball, safeStateByBall, pendingRespawnsByBall, track, time);
+      noContactSecondsByBall.set(ball.id, 0);
+      continue;
+    }
+
+    // If a ball simply got airtime and landed back on a plausible course surface,
+    // reconcile display progress to the landing point instead of freezing it forever.
+    // True lower-track shortcuts are filtered above using the last safe contact
+    // checkpoint, drop height, airtime, and progress gain together.
+    if (
+      hasContact &&
+      frameState &&
+      !frameState.isRaceProgressCredible &&
+      trackStatus.onCourse &&
+      isSafeCheckpointContact(trackStatus, position)
+    ) {
+      frameState.displayProgress = frameState.physicalProgress;
+      frameState.isRaceProgressCredible = true;
+      displayProgressByBall.set(ball.id, frameState.displayProgress);
+    }
+
     if (hasContact) {
       noContactSecondsByBall.set(ball.id, 0);
-      if (frameState?.isRaceProgressCredible) {
-        safeStateByBall.set(ball.id, safeStateForProgress(track, frameState.displayProgress, ball.radius));
+      if (frameState?.isRaceProgressCredible && isSafeCheckpointContact(trackStatus, position)) {
+        const nextSafeState = safeStateFromGroundedPosition(track, position, ball.radius);
+        const previousSafeState = safeStateByBall.get(ball.id);
+
+        if (isSafeCheckpointProgressUpdate(nextSafeState, previousSafeState)) {
+          safeStateByBall.set(ball.id, nextSafeState);
+        }
       }
     } else {
       noContactSecondsByBall.set(ball.id, (noContactSecondsByBall.get(ball.id) ?? 0) + deltaSeconds);
@@ -1811,6 +2018,35 @@ function isClearlyFallingOffCourse(
   return notPlausiblyRacing && belowReferenceCourse && farFromReferenceCourse;
 }
 
+function isIllegalShortcutLanding(
+  frameState: BallFrameState,
+  safeState: SafeBallState | undefined,
+  position: { x: number; y: number; z: number },
+  trackStatus: ReturnType<typeof trackDistanceForPosition>,
+  airborneSeconds: number,
+): boolean {
+  if (!safeState || frameState.isRaceProgressCredible || !trackStatus.onCourse) {
+    return false;
+  }
+
+  if (airborneSeconds < ILLEGAL_SHORTCUT_MIN_AIRTIME_SECONDS) {
+    return false;
+  }
+
+  const progressGain = frameState.physicalProgress - safeState.progress;
+  const verticalDrop = safeState.position.y - position.y;
+  const horizontalSeparation = Math.hypot(
+    safeState.position.x - position.x,
+    safeState.position.z - position.z,
+  );
+
+  return (
+    progressGain >= ILLEGAL_SHORTCUT_MIN_PROGRESS_GAIN &&
+    verticalDrop >= ILLEGAL_SHORTCUT_MIN_VERTICAL_DROP &&
+    horizontalSeparation >= ILLEGAL_SHORTCUT_MIN_HORIZONTAL_SEPARATION
+  );
+}
+
 function queueBallRespawn(
   ball: SimBall,
   safeStateByBall: Map<string, SafeBallState>,
@@ -1822,10 +2058,9 @@ function queueBallRespawn(
     return;
   }
 
-  const fallbackProgress = progressForPosition(track, ball.body.translation());
   pendingRespawnsByBall.set(ball.id, {
     respawnAt: time + FALL_RESPAWN_DELAY_SECONDS,
-    safeState: safeStateByBall.get(ball.id) ?? safeStateForProgress(track, fallbackProgress, ball.radius),
+    safeState: safeStateByBall.get(ball.id) ?? safeStateForProgress(track, 0.4, ball.radius),
   });
 }
 
@@ -1836,10 +2071,100 @@ function safeStateForProgress(track: TrackDefinition, progress: number, radius: 
     progress: sample.distance,
     position: {
       x: sample.x,
-      y: surfaceYAtOffset(sample, 0) + radius + 0.14,
+      y: surfaceYAtOffset(sample, 0) + radius + 0.36,
       z: sample.z,
     },
+    yaw: sample.yaw,
+    tangent: sample.tangent,
   };
+}
+
+function safeStateFromGroundedPosition(
+  track: TrackDefinition,
+  position: { x: number; y: number; z: number },
+  radius: number,
+): SafeBallState {
+  const sample = nearestRaceRouteSample(track, position);
+
+  return {
+    progress: sample.distance,
+    position: {
+      x: sample.x,
+      y: surfaceYAtOffset(sample, 0) + radius + 0.36,
+      z: sample.z,
+    },
+    yaw: sample.yaw,
+    tangent: sample.tangent,
+  };
+}
+
+function isSafeCheckpointContact(
+  trackStatus: ReturnType<typeof trackDistanceForPosition>,
+  position: { x: number; y: number; z: number },
+): boolean {
+  return trackStatus.onCourse && trackStatus.verticalDistance <= 1.35 && position.y > -30;
+}
+
+function isSafeCheckpointProgressUpdate(next: SafeBallState, previous?: SafeBallState): boolean {
+  if (!previous) {
+    return true;
+  }
+
+  return next.progress <= previous.progress + SAFE_CHECKPOINT_MAX_ADVANCE_PER_UPDATE;
+}
+
+function nearestRaceRouteSample(
+  track: TrackDefinition,
+  position: { x: number; y: number; z: number },
+): TrackDefinition["samples"][number] {
+  let closest = track.samples[0];
+  let closestScore = Number.POSITIVE_INFINITY;
+
+  for (const sample of raceRouteSamples(track)) {
+    const dx = sample.x - position.x;
+    const dz = sample.z - position.z;
+    const dy = sample.y - position.y;
+    const score = dx * dx + dz * dz + dy * dy * 0.38;
+
+    if (score < closestScore) {
+      closest = sample;
+      closestScore = score;
+    }
+  }
+
+  return closest;
+}
+
+function raceRouteSamples(track: TrackDefinition): TrackDefinition["samples"] {
+  const cached = routeSamplesByTrack.get(track);
+
+  if (cached) {
+    return cached;
+  }
+
+  const routeSamples: TrackDefinition["samples"][] = [track.samples];
+
+  if (track.splitSurfaces.length > 0) {
+    for (const surface of track.splitSurfaces) {
+      const leftLane = splitSurfaceLaneSamples(surface, -1);
+      const rightLane = splitSurfaceLaneSamples(surface, 1);
+
+      if (leftLane.length >= 2) {
+        routeSamples.push(leftLane);
+      }
+
+      if (rightLane.length >= 2) {
+        routeSamples.push(rightLane);
+      }
+    }
+  } else {
+    routeSamples.push(...track.branches.map((branch) => branch.samples));
+  }
+
+  const samples = routeSamples.flat();
+  routeSamplesByTrack.set(track, samples);
+
+  return samples;
 }
 
 function respawnBallAtSafeState(
@@ -1847,11 +2172,45 @@ function respawnBallAtSafeState(
   safeState: SafeBallState,
   track: TrackDefinition,
 ): void {
-  const sample = sampleAtDistance(track.samples, safeState.progress);
-  ball.body.setTranslation(safeState.position, true);
-  ball.body.setRotation(trackRotation(sample.yaw, 0, 0), true);
-  ball.body.setLinvel({ x: sample.tangent.x * 0.55, y: 0, z: sample.tangent.z * 0.55 }, true);
+  const corrected = correctedSafeRespawnState(track, safeState, ball.radius);
+
+  ball.body.setTranslation(corrected.position, true);
+  ball.body.setRotation(trackRotation(corrected.yaw, 0, 0), true);
+  ball.body.setLinvel({ x: corrected.tangent.x * 0.45, y: 0.02, z: corrected.tangent.z * 0.45 }, true);
   ball.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+}
+
+function correctedSafeRespawnState(
+  track: TrackDefinition,
+  safeState: SafeBallState,
+  radius: number,
+): SafeBallState {
+  const sample = nearestRaceRouteSample(track, safeState.position);
+  const horizontalDistance = Math.hypot(
+    sample.x - safeState.position.x,
+    sample.z - safeState.position.z,
+  );
+  const verticalDistance = Math.abs(sample.y - safeState.position.y);
+  const progressGap = Math.abs(sample.distance - safeState.progress);
+  const useNearestRouteSample = horizontalDistance <= TRACK_WIDTH * 1.4 && verticalDistance <= 5.0 && progressGap <= 10.0;
+  const respawnSample = useNearestRouteSample
+    ? sample
+    : nearestRaceRouteSample(track, {
+        x: sampleAtDistance(track.samples, clamp(safeState.progress, 0, track.finishDistance)).x,
+        y: sampleAtDistance(track.samples, clamp(safeState.progress, 0, track.finishDistance)).y,
+        z: sampleAtDistance(track.samples, clamp(safeState.progress, 0, track.finishDistance)).z,
+      });
+
+  return {
+    progress: respawnSample.distance,
+    position: {
+      x: respawnSample.x,
+      y: surfaceYAtOffset(respawnSample, 0) + radius + 0.42,
+      z: respawnSample.z,
+    },
+    yaw: respawnSample.yaw,
+    tangent: respawnSample.tangent,
+  };
 }
 
 function ballHasAnyContact(world: RAPIER.World, ball: SimBall): boolean {
@@ -1953,20 +2312,172 @@ function surfaceYAtOffset(sample: TrackDefinition["samples"][number], offset: nu
   return sample.y + Math.sin(sample.bank ?? 0) * offset;
 }
 
-function featureSampleAtDistance(
-  track: TrackDefinition,
-  distance: number,
-  featureIndex: number,
-): TrackDefinition["samples"][number] {
-  const branchCandidates = track.branches.filter(
-    (branch) => distance >= branch.startDistance && distance <= branch.endDistance,
-  );
+type RouteAwareFeature = {
+  distance: number;
+  offset?: number;
+  routeId?: string;
+  routeOffset?: number;
+  mainOffset?: number;
+};
 
-  if (branchCandidates.length === 0) {
-    return sampleAtDistance(track.samples, distance);
+function featureSampleForFeature(
+  track: TrackDefinition,
+  feature: RouteAwareFeature,
+): TrackDefinition["samples"][number] {
+  const routeId = feature.routeId ?? "";
+
+  if (routeId.startsWith("split-")) {
+    const match = /^split-(\d+)-(left|right)$/.exec(routeId);
+
+    if (match) {
+      const splitIndex = Number(match[1]);
+      const side = match[2] === "left" ? -1 : 1;
+      const surface = track.splitSurfaces[splitIndex];
+
+      if (surface) {
+        return splitSurfaceSampleAtDistance(surface, feature.distance, side);
+      }
+
+      const branch = track.branches.find(
+        (candidate, index) =>
+          Math.floor(index / 2) === splitIndex && candidate.side === side,
+      );
+
+      if (branch) {
+        return sampleAtDistance(branch.samples, feature.distance);
+      }
+    }
   }
 
-  return sampleAtDistance(branchCandidates[featureIndex % branchCandidates.length].samples, distance);
+  return sampleAtDistance(track.samples, feature.distance);
+}
+
+function featureRenderOffset(feature: RouteAwareFeature): number {
+  return feature.routeOffset ?? feature.offset ?? 0;
+}
+
+function splitSurfaceLaneSamples(
+  surface: TrackDefinition["splitSurfaces"][number],
+  side: -1 | 1,
+): TrackDefinition["samples"] {
+  const rowSize = 8;
+  const vertices = surface.road.vertices;
+  const rowCount = Math.floor(vertices.length / (rowSize * 3));
+  const samples: TrackDefinition["samples"] = [];
+
+  if (rowCount <= 0) {
+    return samples;
+  }
+
+  const leftColumn = side < 0 ? 0 : 4;
+  const rightColumn = side < 0 ? 3 : 7;
+
+  for (let row = 0; row < rowCount; row += 1) {
+    const alpha = rowCount <= 1 ? 0 : row / (rowCount - 1);
+    const distance = surface.startDistance + (surface.endDistance - surface.startDistance) * alpha;
+    const previousRow = Math.max(0, row - 1);
+    const nextRow = Math.min(rowCount - 1, row + 1);
+    const left = splitSurfaceVertex(vertices, row, leftColumn, rowSize);
+    const right = splitSurfaceVertex(vertices, row, rightColumn, rowSize);
+    const previousCenter = splitSurfaceLaneCenter(vertices, previousRow, leftColumn, rightColumn, rowSize);
+    const nextCenter = splitSurfaceLaneCenter(vertices, nextRow, leftColumn, rightColumn, rowSize);
+    const center = midpoint3(left, right);
+    const tangent = normalize3({
+      x: nextCenter.x - previousCenter.x,
+      y: nextCenter.y - previousCenter.y,
+      z: nextCenter.z - previousCenter.z,
+    });
+    const normal = normalizeXZ({ x: right.x - left.x, z: right.z - left.z });
+    const width = Math.max(0.1, Math.hypot(right.x - left.x, right.z - left.z));
+
+    samples.push({
+      x: center.x,
+      y: center.y,
+      z: center.z,
+      distance,
+      tangent,
+      normal,
+      yaw: Math.atan2(tangent.x, tangent.z),
+      width,
+      bank: Math.asin(clamp((right.y - left.y) / width, -0.35, 0.35)),
+      surfaceFriction: 0.18,
+    });
+  }
+
+  return samples;
+}
+
+function splitSurfaceSampleAtDistance(
+  surface: TrackDefinition["splitSurfaces"][number],
+  distance: number,
+  side: -1 | 1,
+): TrackDefinition["samples"][number] {
+  const rowSize = 8;
+  const vertices = surface.road.vertices;
+  const rowCount = Math.floor(vertices.length / (rowSize * 3));
+
+  if (rowCount <= 0) {
+    throw new Error("Cannot sample an empty split surface");
+  }
+
+  const alpha = clamp((distance - surface.startDistance) / Math.max(surface.endDistance - surface.startDistance, 0.0001), 0, 1);
+  const row = clamp(Math.round(alpha * (rowCount - 1)), 0, rowCount - 1);
+  const previousRow = Math.max(0, row - 1);
+  const nextRow = Math.min(rowCount - 1, row + 1);
+  const leftColumn = side < 0 ? 0 : 4;
+  const rightColumn = side < 0 ? 3 : 7;
+  const left = splitSurfaceVertex(vertices, row, leftColumn, rowSize);
+  const right = splitSurfaceVertex(vertices, row, rightColumn, rowSize);
+  const previousCenter = splitSurfaceLaneCenter(vertices, previousRow, leftColumn, rightColumn, rowSize);
+  const nextCenter = splitSurfaceLaneCenter(vertices, nextRow, leftColumn, rightColumn, rowSize);
+  const center = midpoint3(left, right);
+  const tangent = normalize3({
+    x: nextCenter.x - previousCenter.x,
+    y: nextCenter.y - previousCenter.y,
+    z: nextCenter.z - previousCenter.z,
+  });
+  const normal = normalizeXZ({ x: right.x - left.x, z: right.z - left.z });
+  const width = Math.max(0.1, Math.hypot(right.x - left.x, right.z - left.z));
+
+  return {
+    x: center.x,
+    y: center.y,
+    z: center.z,
+    distance,
+    tangent,
+    normal,
+    yaw: Math.atan2(tangent.x, tangent.z),
+    width,
+    bank: Math.asin(clamp((right.y - left.y) / width, -0.35, 0.35)),
+    surfaceFriction: 0.18,
+  };
+}
+
+function splitSurfaceVertex(vertices: Float32Array, row: number, column: number, rowSize: number): { x: number; y: number; z: number } {
+  const offset = (row * rowSize + column) * 3;
+  return { x: vertices[offset], y: vertices[offset + 1], z: vertices[offset + 2] };
+}
+
+function splitSurfaceLaneCenter(vertices: Float32Array, row: number, leftColumn: number, rightColumn: number, rowSize: number): { x: number; y: number; z: number } {
+  return midpoint3(splitSurfaceVertex(vertices, row, leftColumn, rowSize), splitSurfaceVertex(vertices, row, rightColumn, rowSize));
+}
+
+function midpoint3(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+    z: (a.z + b.z) / 2,
+  };
+}
+
+function normalize3(value: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  const length = Math.hypot(value.x, value.y, value.z) || 1;
+  return { x: value.x / length, y: value.y / length, z: value.z / length };
+}
+
+function normalizeXZ(value: { x: number; z: number }): { x: number; z: number } {
+  const length = Math.hypot(value.x, value.z) || 1;
+  return { x: value.x / length, z: value.z / length };
 }
 
 function verticalObstacleCenterY(trackY: number, fullHeight: number, extension: number): number {
@@ -1998,14 +2509,6 @@ function isSplitWallJunctionGap(track: TrackDefinition, distance: number, side: 
 
   return track.splitSurfaces.some(
     (surface) => distance >= surface.startDistance && distance <= surface.endDistance,
-  );
-}
-
-function isWallSegmentMissing(track: TrackDefinition, distance: number, side: -1 | 1): boolean {
-  return track.features.missingWallSegments.some(
-    (segment) =>
-      segment.side === side &&
-      Math.abs(distance - segment.distance) <= segment.length / 2,
   );
 }
 
@@ -2159,12 +2662,13 @@ function getNewFinishers(
   disqualifiedIds: Set<string>,
   track: TrackDefinition,
   frameStateByBall: Map<string, BallFrameState>,
-): Array<{ id: string; optionId: string; body: RAPIER.RigidBody; z: number }> {
+): Array<{ id: string; optionId: string; body: RAPIER.RigidBody; position: { x: number; y: number; z: number }; z: number; progressCredible: boolean }> {
   return balls
     .filter((ball) => !disqualifiedIds.has(ball.id))
     .map((ball) => {
       const position = ball.body.translation();
-      const progress = frameStateByBall.get(ball.id)?.physicalProgress ?? progressForPosition(track, position);
+      const frameState = frameStateByBall.get(ball.id);
+      const progress = frameState?.displayProgress ?? progressForPosition(track, position);
 
       return {
         id: ball.id,
@@ -2172,9 +2676,11 @@ function getNewFinishers(
         body: ball.body,
         position,
         z: progress,
+        progressCredible: frameState?.isRaceProgressCredible ?? true,
       };
     })
     .filter((ball) =>
+      ball.progressCredible &&
       ball.z >= track.finishDistance &&
       !finishedIds.has(ball.id) &&
       isValidFinishCrossing(track, ball.position, ball.z),
@@ -2432,3 +2938,5 @@ function smoothstep(edge0: number, edge1: number, value: number): number {
 function interactionGroups(memberships: number, filters: number): number {
   return ((memberships & 0xffff) << 16) | (filters & 0xffff);
 }
+
+

@@ -6,6 +6,10 @@ export const START_HEIGHT = 42;
 export const MIN_SLOPE = 0.095;
 export const ROAD_SAMPLES = 1500;
 
+const MIN_MAIN_TRACK_WIDTH = TRACK_WIDTH * 0.92;
+const MIN_SPLIT_LANE_WIDTH = TRACK_WIDTH * 0.96;
+const MIN_FEATURE_ROUTE_WIDTH = TRACK_WIDTH * 0.94;
+
 const MIN_CENTERLINE_CLEARANCE = TRACK_WIDTH + 5.6;
 const MIN_VERTICAL_CROSSING_CLEARANCE = 10.0;
 const MAX_LOCAL_YAW_DELTA = 0.68;
@@ -21,8 +25,12 @@ export const PEG_LOWER_SECONDS = 3;
 export const PEG_HOLD_DOWN_SECONDS = 3;
 export const PEG_RAISE_SECONDS = 3;
 
-export function obstacleCycleValue(time: number, phase = 0, period = PEG_MOTION_PERIOD): number {
-  return ((time + phase) % period + period) % period;
+export function obstacleCycleValue(
+  time: number,
+  phase = 0,
+  period = PEG_MOTION_PERIOD,
+): number {
+  return (((time + phase) % period) + period) % period;
 }
 
 export function pegExtensionAtTime(time: number, phase = 0): number {
@@ -40,7 +48,8 @@ export function pegExtensionAtTime(time: number, phase = 0): number {
     return 0;
   }
 
-  const raiseStart = PEG_HOLD_UP_SECONDS + PEG_LOWER_SECONDS + PEG_HOLD_DOWN_SECONDS;
+  const raiseStart =
+    PEG_HOLD_UP_SECONDS + PEG_LOWER_SECONDS + PEG_HOLD_DOWN_SECONDS;
   return smoothstep(0, 1, (t - raiseStart) / PEG_RAISE_SECONDS);
 }
 
@@ -106,16 +115,122 @@ export type TrackDefinition = {
 };
 
 export type TrackFeatures = {
-  wideZones: Array<{ startDistance: number; endDistance: number; extraWidth: number; kind: "funnel" | "bowl" | "split" }>;
-  pegs: Array<{ distance: number; offset: number; radius: number; phase: number }>;
-  greenBumpers: Array<{ distance: number; offset: number; radius: number }>;
-  gates: Array<{ distance: number; phase: number }>;
-  trappers: Array<{ distance: number; phase: number; radius: number }>;
-  spinners: Array<{ distance: number; phase: number; speed: number }>;
-  hammers: Array<{ distance: number; phase: number; side: -1 | 1 }>;
-  turnstiles: Array<{ distance: number; phase: number; speed: number }>;
-  missingWallSegments: Array<{ distance: number; length: number; side: -1 | 1 }>;
-  powerups: Array<{ id: string; distance: number; offset: number; kind: PowerupKind }>;
+  wideZones: Array<{
+    startDistance: number;
+    endDistance: number;
+    extraWidth: number;
+    kind: "funnel" | "bowl" | "split";
+  }>;
+  pegs: Array<{
+    distance: number;
+    offset: number;
+    radius: number;
+    phase: number;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }>;
+  greenBumpers: Array<{
+    distance: number;
+    offset: number;
+    radius: number;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }>;
+  gates: Array<{
+    distance: number;
+    phase: number;
+    offset?: number;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }>;
+  trappers: Array<{
+    distance: number;
+    phase: number;
+    radius: number;
+    offset?: number;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }>;
+  spinners: Array<{
+    distance: number;
+    phase: number;
+    speed: number;
+    offset?: number;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }>;
+  hammers: Array<{
+    distance: number;
+    phase: number;
+    side: -1 | 1;
+    offset?: number;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }>;
+  turnstiles: Array<{
+    distance: number;
+    phase: number;
+    speed: number;
+    offset?: number;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }>;
+  powerups: Array<{
+    id: string;
+    distance: number;
+    offset: number;
+    kind: PowerupKind;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }>;
   splitModules: Array<{
     startDistance: number;
     endDistance: number;
@@ -137,7 +252,16 @@ export type TrackFeatures = {
   }>;
 };
 
-export type PowerupKind = "speed" | "giant" | "tiny" | "ghost" | "slow" | "barrier" | "smash";
+export type PowerupKind =
+  | "speed"
+  | "giant"
+  | "tiny"
+  | "ghost"
+  | "slow"
+  | "barrier"
+  | "smash";
+
+const routeSamplesByTrack = new WeakMap<TrackDefinition, TrackSample[]>();
 
 type SplitLaneProfile = {
   startEase: number;
@@ -165,28 +289,106 @@ type StraightSection = {
   heading: number;
 };
 
-export function generateTrack(seed: string, obstacleSeed = seed): TrackDefinition {
+export function generateTrack(
+  seed: string,
+  obstacleSeed = seed,
+): TrackDefinition {
+  let bestValid: TrackDefinition | null = null;
+  let bestValidSplitCount = -1;
+
   for (let attempt = 0; attempt < 120; attempt += 1) {
     const rng = createSeededRng(`${seed}:track:${attempt}`);
     const featureRng = createSeededRng(`${obstacleSeed}:features:${attempt}`);
     const metrics = createTrackMetrics(rng);
-    const points = generateOrganicPoints(rng, metrics.totalLength, metrics.startHeight, metrics);
-    const baseSamples = sampleTrack(points, ROAD_SAMPLES, metrics.totalLength, metrics.startHeight);
+    const points = generateOrganicPoints(
+      rng,
+      metrics.totalLength,
+      metrics.startHeight,
+      metrics,
+    );
+    const baseSamples = sampleTrack(
+      points,
+      ROAD_SAMPLES,
+      metrics.totalLength,
+      metrics.startHeight,
+    );
 
-    const candidate = createTrackDefinition(seed, points, baseSamples, rng, featureRng, metrics);
+    const candidate = createTrackDefinition(
+      seed,
+      points,
+      baseSamples,
+      rng,
+      featureRng,
+      metrics,
+    );
 
-    if (!hasBadTrackGeometry(candidate.samples, metrics.totalLength)) {
+    if (hasBadTrackGeometry(candidate.samples, metrics.totalLength)) {
+      continue;
+    }
+
+    const splitCount = candidate.splitSurfaces.length;
+    const preferredSplitCount = preferredRenderedSplitCount(candidate.finishDistance);
+
+    if (splitCount > bestValidSplitCount) {
+      bestValid = candidate;
+      bestValidSplitCount = splitCount;
+    }
+
+    // Prefer tracks that naturally produced rendered split surfaces, but do not
+    // loosen the split geometry criteria. This avoids the previous failure mode
+    // where forcing extra split modules made fork/merge slopes and geometry odd.
+    if (splitCount >= preferredSplitCount) {
+      return candidate;
+    }
+
+    // If we still have no split late in the search, keep looking; otherwise let
+    // a good one-split course through so generation does not become expensive.
+    if (attempt >= 60 && splitCount > 0) {
       return candidate;
     }
   }
 
-  const fallbackRng = createSeededRng(`${seed}:track:fallback`);
-  const fallbackFeatureRng = createSeededRng(`${obstacleSeed}:features:fallback`);
-  const metrics = createTrackMetrics(fallbackRng);
-  const points = generateFallbackPoints(fallbackRng, metrics.totalLength, metrics.startHeight);
-  const baseSamples = sampleTrack(points, ROAD_SAMPLES, metrics.totalLength, metrics.startHeight);
+  if (bestValid) {
+    return bestValid;
+  }
 
-  return createTrackDefinition(seed, points, baseSamples, fallbackRng, fallbackFeatureRng, metrics);
+  const fallbackRng = createSeededRng(`${seed}:track:fallback`);
+  const fallbackFeatureRng = createSeededRng(
+    `${obstacleSeed}:features:fallback`,
+  );
+  const metrics = createTrackMetrics(fallbackRng);
+  const points = generateFallbackPoints(
+    fallbackRng,
+    metrics.totalLength,
+    metrics.startHeight,
+  );
+  const baseSamples = sampleTrack(
+    points,
+    ROAD_SAMPLES,
+    metrics.totalLength,
+    metrics.startHeight,
+  );
+
+  return createTrackDefinition(
+    seed,
+    points,
+    baseSamples,
+    fallbackRng,
+    fallbackFeatureRng,
+    metrics,
+  );
+}
+
+function preferredRenderedSplitCount(finishDistance: number): number {
+  if (finishDistance > 760) {
+    return 2;
+  }
+
+  if (finishDistance > 300) {
+    return 1;
+  }
+
+  return 0;
 }
 
 function createTrackDefinition(
@@ -199,11 +401,27 @@ function createTrackDefinition(
 ): TrackDefinition {
   const finishDistance = metrics.totalLength - metrics.finishRunout;
   const catchDistance = metrics.totalLength + metrics.catchRunout;
-  const features = createFeatures(baseSamples, mapRng, obstacleRng, finishDistance);
+  const features = createFeatures(
+    baseSamples,
+    mapRng,
+    obstacleRng,
+    finishDistance,
+  );
   const samples = applyFeatureModifiers(baseSamples, features);
   const branches = createBranches(samples, mapRng, features);
   const splitSurfaces = createSplitSurfaces(samples, branches, features);
-  const splitRoadGaps = splitSurfaces.map(({ startDistance, endDistance }) => ({ startDistance, endDistance }));
+  populateCourseFeatures(
+    features,
+    samples,
+    branches,
+    splitSurfaces,
+    obstacleRng,
+    finishDistance,
+  );
+  const splitRoadGaps = splitSurfaces.map(({ startDistance, endDistance }) => ({
+    startDistance,
+    endDistance,
+  }));
 
   return {
     seed,
@@ -241,30 +459,43 @@ type TrackMetrics = {
 };
 
 function createTrackMetrics(rng: () => number): TrackMetrics {
-  const totalLength = 220 + rng() * 1780;
-  const slopeBase = 0.07 + rng() * 0.065;
-  const slopePulseScale = 0.45 + rng() * 1.45;
-  const estimatedDrop = totalLength * (slopeBase + slopePulseScale * 0.025);
-  const startHeight = clamp(estimatedDrop * (0.82 + rng() * 0.45), 32, 260);
+  // Bias the overall course shape toward split-friendly tracks rather than
+  // relaxing the split validators themselves. Longer, smoother, less cramped
+  // tracks naturally create more valid fork/merge regions without making the
+  // accepted split geometry steeper or stranger.
+  const totalLength = 480 + rng() * 1720;
+  const slopeBase = 0.058 + rng() * 0.052;
+  const slopePulseScale = 0.34 + rng() * 1.05;
+  const estimatedDrop = totalLength * (slopeBase + slopePulseScale * 0.02);
+  const startHeight = clamp(estimatedDrop * (0.84 + rng() * 0.34), 36, 220);
+  const splitFriendlyStyle = rng() < 0.58;
+  const shapeStyle = splitFriendlyStyle
+    ? 8 + Math.floor(rng() * 4)
+    : Math.floor(rng() * 12);
 
   return {
     totalLength,
     startHeight,
-    finishRunout: 12 + rng() * 30,
+    finishRunout: 14 + rng() * 28,
     catchRunout: 14 + rng() * 24,
-    shapeStyle: Math.floor(rng() * 12),
-    pointCount: 18 + Math.floor(rng() * 42),
-    envelope: 26 + rng() * 92,
-    curveScale: 0.45 + rng() * 1.05,
-    stepVariance: 0.32 + rng() * 0.68,
-    relaxIterations: 2 + Math.floor(rng() * 4),
+    shapeStyle,
+    pointCount: 28 + Math.floor(rng() * 44),
+    envelope: 54 + rng() * 132,
+    curveScale: 0.34 + rng() * 0.82,
+    stepVariance: 0.24 + rng() * 0.54,
+    relaxIterations: 3 + Math.floor(rng() * 4),
     slopeBase,
     slopePulseScale,
-    slopeWaveScale: 0.012 + rng() * 0.05,
+    slopeWaveScale: 0.008 + rng() * 0.034,
   };
 }
 
-function generateOrganicPoints(rng: () => number, totalLength: number, startHeight: number, metrics: TrackMetrics): TrackPoint[] {
+function generateOrganicPoints(
+  rng: () => number,
+  totalLength: number,
+  startHeight: number,
+  metrics: TrackMetrics,
+): TrackPoint[] {
   const plan = generateOrganicPlan(rng, totalLength, metrics);
   const points: TrackPoint[] = [];
   let y = startHeight;
@@ -275,7 +506,10 @@ function generateOrganicPoints(rng: () => number, totalLength: number, startHeig
 
     if (index > 0) {
       const previous = plan[index - 1];
-      const flatDistance = Math.hypot(current.x - previous.x, current.z - previous.z);
+      const flatDistance = Math.hypot(
+        current.x - previous.x,
+        current.z - previous.z,
+      );
       const t = index / (plan.length - 1);
       const slope = organicSlopeAt(t, rng, metrics);
       y -= flatDistance * slope;
@@ -292,7 +526,11 @@ function generateOrganicPoints(rng: () => number, totalLength: number, startHeig
   return points;
 }
 
-function generateOrganicPlan(rng: () => number, totalLength: number, metrics: TrackMetrics): PlanPoint[] {
+function generateOrganicPlan(
+  rng: () => number,
+  totalLength: number,
+  metrics: TrackMetrics,
+): PlanPoint[] {
   const pointCount = metrics.pointCount;
   const points: PlanPoint[] = [];
   const shapeStyle = metrics.shapeStyle;
@@ -307,53 +545,105 @@ function generateOrganicPlan(rng: () => number, totalLength: number, metrics: Tr
   const waveA = 1.8 + rng() * 7.2;
   const waveB = 1.4 + rng() * 5.8;
   const startHeading = heading;
-  const straightSections = createStraightSections(rng, shapeStyle, startHeading);
+  const straightSections = createStraightSections(
+    rng,
+    shapeStyle,
+    startHeading,
+  );
 
   points.push({ x, z });
 
   for (let index = 1; index < pointCount; index += 1) {
     const t = index / (pointCount - 1);
-    const step = (totalLength / pointCount) * (0.48 + rng() * metrics.stepVariance);
+    const step =
+      (totalLength / pointCount) * (0.48 + rng() * metrics.stepVariance);
     const wandering = Math.sin(t * Math.PI * waveA + rng() * Math.PI * 2);
     const wanderingB = Math.sin(t * Math.PI * waveB + rng() * Math.PI * 2);
     const curveImpulse = (rng() - 0.5) * (0.22 + metrics.curveScale * 0.64);
-    const straightSection = straightSections.find((section) => t >= section.start && t <= section.end);
+    const straightSection = straightSections.find(
+      (section) => t >= section.start && t <= section.end,
+    );
 
     if (straightSection) {
       turnVelocity *= 0.18;
-      heading = blendAngle(heading, straightSection.heading + wandering * 0.08, 0.62);
+      heading = blendAngle(
+        heading,
+        straightSection.heading + wandering * 0.08,
+        0.62,
+      );
     } else if (shapeStyle === 0) {
       turnVelocity = clamp(turnVelocity * 0.56 + curveImpulse, -1.35, 1.35);
       heading += turnVelocity + wandering * 0.42 * metrics.curveScale;
     } else if (shapeStyle === 1) {
-      const desired = Math.atan2(-z * 0.35 + Math.sin(t * Math.PI * (2 + waveA)) * envelope * 0.46, -x);
-      turnVelocity = clamp(turnVelocity + orbitSign * (0.11 + rng() * 0.24) * metrics.curveScale, -1.55, 1.55);
-      heading = blendAngle(heading + turnVelocity * 0.58, desired + orbitSign * Math.PI / 2, 0.12 + rng() * 0.24);
+      const desired = Math.atan2(
+        -z * 0.35 + Math.sin(t * Math.PI * (2 + waveA)) * envelope * 0.46,
+        -x,
+      );
+      turnVelocity = clamp(
+        turnVelocity + orbitSign * (0.11 + rng() * 0.24) * metrics.curveScale,
+        -1.55,
+        1.55,
+      );
+      heading = blendAngle(
+        heading + turnVelocity * 0.58,
+        desired + (orbitSign * Math.PI) / 2,
+        0.12 + rng() * 0.24,
+      );
     } else if (shapeStyle === 2) {
       if (index % switchbackEvery === 0) {
         orbitSign *= -1;
       }
-      turnVelocity = clamp(turnVelocity * 0.68 + orbitSign * (0.18 + rng() * 0.42) * metrics.curveScale, -1.5, 1.5);
+      turnVelocity = clamp(
+        turnVelocity * 0.68 +
+          orbitSign * (0.18 + rng() * 0.42) * metrics.curveScale,
+        -1.5,
+        1.5,
+      );
       heading += turnVelocity + wandering * 0.25;
     } else if (shapeStyle === 3) {
-      const returnBias = Math.atan2(-x + Math.sin(t * Math.PI * waveA) * envelope * 0.28, 18 + Math.cos(t * Math.PI * waveB) * envelope * 0.38);
+      const returnBias = Math.atan2(
+        -x + Math.sin(t * Math.PI * waveA) * envelope * 0.28,
+        18 + Math.cos(t * Math.PI * waveB) * envelope * 0.38,
+      );
       turnVelocity = clamp(turnVelocity * 0.74 + curveImpulse, -1.32, 1.32);
-      heading = blendAngle(heading + turnVelocity, returnBias, 0.08 + rng() * 0.26);
+      heading = blendAngle(
+        heading + turnVelocity,
+        returnBias,
+        0.08 + rng() * 0.26,
+      );
     } else if (shapeStyle === 4) {
       const spiralRadius = envelope * (0.18 + Math.sin(t * Math.PI) * 0.7);
       const desiredPoint = {
         x: Math.cos(t * Math.PI * (1.6 + rng() * 4.8)) * spiralRadius,
         z: Math.sin(t * Math.PI * (1.4 + rng() * 4.2)) * spiralRadius,
       };
-      heading = blendAngle(heading + curveImpulse, Math.atan2(desiredPoint.z - z, desiredPoint.x - x), 0.18 + rng() * 0.24);
+      heading = blendAngle(
+        heading + curveImpulse,
+        Math.atan2(desiredPoint.z - z, desiredPoint.x - x),
+        0.18 + rng() * 0.24,
+      );
     } else if (shapeStyle === 5) {
-      const targetHeading = startHeading + Math.sin(t * Math.PI * waveA) * Math.PI * 0.88 + wanderingB * 0.6;
+      const targetHeading =
+        startHeading +
+        Math.sin(t * Math.PI * waveA) * Math.PI * 0.88 +
+        wanderingB * 0.6;
       turnVelocity = clamp(turnVelocity * 0.5 + curveImpulse, -1.45, 1.45);
-      heading = blendAngle(heading + turnVelocity, targetHeading, 0.16 + rng() * 0.2);
+      heading = blendAngle(
+        heading + turnVelocity,
+        targetHeading,
+        0.16 + rng() * 0.2,
+      );
     } else if (shapeStyle === 6) {
-      const boxHeading = Math.floor(t * (5 + rng() * 5)) % 2 === 0 ? startHeading + Math.PI / 2 : startHeading - Math.PI / 2;
+      const boxHeading =
+        Math.floor(t * (5 + rng() * 5)) % 2 === 0
+          ? startHeading + Math.PI / 2
+          : startHeading - Math.PI / 2;
       turnVelocity = clamp(turnVelocity * 0.58 + curveImpulse, -1.4, 1.4);
-      heading = blendAngle(heading + turnVelocity, boxHeading + wandering * 0.55, 0.1 + rng() * 0.22);
+      heading = blendAngle(
+        heading + turnVelocity,
+        boxHeading + wandering * 0.55,
+        0.1 + rng() * 0.22,
+      );
     } else if (shapeStyle === 7) {
       if (index % switchbackEvery === 0 || rng() < 0.08) {
         heading += (rng() < 0.5 ? -1 : 1) * (Math.PI * (0.55 + rng() * 0.5));
@@ -362,23 +652,50 @@ function generateOrganicPlan(rng: () => number, totalLength: number, metrics: Tr
       heading += turnVelocity;
     } else if (shapeStyle === 8) {
       const corridorHeading = startHeading + Math.sin(t * Math.PI * 2.2) * 0.58;
-      turnVelocity = clamp(turnVelocity * 0.38 + curveImpulse * 0.22, -0.55, 0.55);
+      turnVelocity = clamp(
+        turnVelocity * 0.38 + curveImpulse * 0.22,
+        -0.55,
+        0.55,
+      );
       heading = blendAngle(heading + turnVelocity, corridorHeading, 0.34);
     } else if (shapeStyle === 9) {
-      const bendCenter = Math.sin(t * Math.PI * (2.0 + rng() * 1.6)) > 0 ? 1 : -1;
-      const desired = startHeading + bendCenter * (0.22 + rng() * 0.5) + wandering * 0.18;
-      turnVelocity = clamp(turnVelocity * 0.52 + curveImpulse * 0.28, -0.72, 0.72);
+      const bendCenter =
+        Math.sin(t * Math.PI * (2.0 + rng() * 1.6)) > 0 ? 1 : -1;
+      const desired =
+        startHeading + bendCenter * (0.22 + rng() * 0.5) + wandering * 0.18;
+      turnVelocity = clamp(
+        turnVelocity * 0.52 + curveImpulse * 0.28,
+        -0.72,
+        0.72,
+      );
       heading = blendAngle(heading + turnVelocity, desired, 0.26);
     } else if (shapeStyle === 10) {
       const phase = Math.floor(t * (4 + rng() * 5));
-      const desired = startHeading + (phase % 2 === 0 ? 0 : (rng() < 0.5 ? -1 : 1) * (Math.PI * 0.42 + rng() * 0.38));
-      turnVelocity = clamp(turnVelocity * 0.35 + curveImpulse * 0.16, -0.62, 0.62);
+      const desired =
+        startHeading +
+        (phase % 2 === 0
+          ? 0
+          : (rng() < 0.5 ? -1 : 1) * (Math.PI * 0.42 + rng() * 0.38));
+      turnVelocity = clamp(
+        turnVelocity * 0.35 + curveImpulse * 0.16,
+        -0.62,
+        0.62,
+      );
       heading = blendAngle(heading + turnVelocity, desired, 0.38);
     } else {
-      const chicane = Math.sin(t * Math.PI * (3 + rng() * 4)) * (0.34 + rng() * 0.42);
+      const chicane =
+        Math.sin(t * Math.PI * (3 + rng() * 4)) * (0.34 + rng() * 0.42);
       const longStraightBias = Math.sin(t * Math.PI * 2) > -0.15 ? 0 : chicane;
-      turnVelocity = clamp(turnVelocity * 0.48 + curveImpulse * 0.24, -0.82, 0.82);
-      heading = blendAngle(heading + turnVelocity, startHeading + longStraightBias, 0.22);
+      turnVelocity = clamp(
+        turnVelocity * 0.48 + curveImpulse * 0.24,
+        -0.82,
+        0.82,
+      );
+      heading = blendAngle(
+        heading + turnVelocity,
+        startHeading + longStraightBias,
+        0.22,
+      );
     }
 
     x += Math.cos(heading) * step;
@@ -396,7 +713,11 @@ function generateOrganicPlan(rng: () => number, totalLength: number, metrics: Tr
   return relaxPlan(points, metrics.relaxIterations);
 }
 
-function createStraightSections(rng: () => number, shapeStyle: number, startHeading: number): StraightSection[] {
+function createStraightSections(
+  rng: () => number,
+  shapeStyle: number,
+  startHeading: number,
+): StraightSection[] {
   const sections: StraightSection[] = [];
   const count =
     shapeStyle >= 8
@@ -440,19 +761,39 @@ function relaxPlan(points: PlanPoint[], iterations: number): PlanPoint[] {
   return result;
 }
 
-function organicSlopeAt(t: number, rng: () => number, metrics: TrackMetrics): number {
+function organicSlopeAt(
+  t: number,
+  rng: () => number,
+  metrics: TrackMetrics,
+): number {
   const steepDrop =
-    gaussianPulse(t, 0.12 + rng() * 0.16, 0.05 + rng() * 0.06) * 0.08 * metrics.slopePulseScale +
-    gaussianPulse(t, 0.38 + rng() * 0.24, 0.06 + rng() * 0.08) * 0.07 * metrics.slopePulseScale +
-    gaussianPulse(t, 0.68 + rng() * 0.18, 0.05 + rng() * 0.07) * 0.075 * metrics.slopePulseScale;
+    gaussianPulse(t, 0.12 + rng() * 0.16, 0.05 + rng() * 0.06) *
+      0.08 *
+      metrics.slopePulseScale +
+    gaussianPulse(t, 0.38 + rng() * 0.24, 0.06 + rng() * 0.08) *
+      0.07 *
+      metrics.slopePulseScale +
+    gaussianPulse(t, 0.68 + rng() * 0.18, 0.05 + rng() * 0.07) *
+      0.075 *
+      metrics.slopePulseScale;
 
-  const rollingVariation = Math.sin(t * Math.PI * (3.5 + rng() * 10.5) + rng() * 2.5) * metrics.slopeWaveScale;
+  const rollingVariation =
+    Math.sin(t * Math.PI * (3.5 + rng() * 10.5) + rng() * 2.5) *
+    metrics.slopeWaveScale;
   const randomVariation = (rng() - 0.5) * metrics.slopeWaveScale;
 
-  return clamp(metrics.slopeBase + steepDrop + rollingVariation + randomVariation, 0.052, 0.32);
+  return clamp(
+    metrics.slopeBase + steepDrop + rollingVariation + randomVariation,
+    0.052,
+    0.32,
+  );
 }
 
-function generateFallbackPoints(rng: () => number, totalLength: number, startHeight: number): TrackPoint[] {
+function generateFallbackPoints(
+  rng: () => number,
+  totalLength: number,
+  startHeight: number,
+): TrackPoint[] {
   const points: TrackPoint[] = [];
   const controlCount = 36;
   let y = startHeight;
@@ -475,7 +816,11 @@ function generateFallbackPoints(rng: () => number, totalLength: number, startHei
   return points;
 }
 
-function createBranches(samples: TrackSample[], rng: () => number, features: TrackFeatures): TrackDefinition["branches"] {
+function createBranches(
+  samples: TrackSample[],
+  rng: () => number,
+  features: TrackFeatures,
+): TrackDefinition["branches"] {
   return features.splitModules.flatMap((module) =>
     ([-1, 1] as const).map((side) => {
       const branchSamples = createSplitLaneSamples(samples, module, side, rng);
@@ -529,11 +874,18 @@ function createNaturalSplitSurface(
   }
 
   const sections = moduleSamples.map((sample, index) =>
-    createSplitSection(sample, module, index === 0 || index === moduleSamples.length - 1),
+    createSplitSection(
+      sample,
+      module,
+      index === 0 || index === moduleSamples.length - 1,
+    ),
   );
   const road = createNaturalSplitRoadMesh(sections);
 
-  if (road.indices.length === 0 || !hasEnoughNaturalSplitClearance(sections, module)) {
+  if (
+    road.indices.length === 0 ||
+    !hasEnoughNaturalSplitClearance(sections, module)
+  ) {
     return null;
   }
 
@@ -573,8 +925,14 @@ function splitModuleSamples(
   // and the split mesh terminate on different cross-sections, which creates the
   // occasional visible seams at fork/merge boundaries. Interior rows remain dense
   // and interpolated so the split floor still grades smoothly.
-  const startIndex = Math.max(1, firstSampleIndexAtOrAfter(samples, module.startDistance));
-  const endIndex = Math.min(samples.length - 2, lastSampleIndexAtOrBefore(samples, module.endDistance));
+  const startIndex = Math.max(
+    1,
+    firstSampleIndexAtOrAfter(samples, module.startDistance),
+  );
+  const endIndex = Math.min(
+    samples.length - 2,
+    lastSampleIndexAtOrBefore(samples, module.endDistance),
+  );
 
   if (endIndex <= startIndex + 3) {
     return [];
@@ -596,7 +954,10 @@ function splitModuleSamples(
   return result;
 }
 
-function firstSampleIndexAtOrAfter(samples: TrackSample[], distance: number): number {
+function firstSampleIndexAtOrAfter(
+  samples: TrackSample[],
+  distance: number,
+): number {
   for (let index = 0; index < samples.length; index += 1) {
     if (samples[index].distance >= distance) {
       return index;
@@ -606,7 +967,10 @@ function firstSampleIndexAtOrAfter(samples: TrackSample[], distance: number): nu
   return samples.length - 1;
 }
 
-function lastSampleIndexAtOrBefore(samples: TrackSample[], distance: number): number {
+function lastSampleIndexAtOrBefore(
+  samples: TrackSample[],
+  distance: number,
+): number {
   for (let index = samples.length - 1; index >= 0; index -= 1) {
     if (samples[index].distance <= distance) {
       return index;
@@ -616,7 +980,10 @@ function lastSampleIndexAtOrBefore(samples: TrackSample[], distance: number): nu
   return 0;
 }
 
-function interpolatedSampleAtDistance(samples: TrackSample[], distance: number): TrackSample {
+function interpolatedSampleAtDistance(
+  samples: TrackSample[],
+  distance: number,
+): TrackSample {
   if (samples.length === 0) {
     throw new Error("Cannot sample an empty track");
   }
@@ -630,13 +997,21 @@ function interpolatedSampleAtDistance(samples: TrackSample[], distance: number):
     return last;
   }
 
-  let upperIndex = 1;
-  while (upperIndex < samples.length && samples[upperIndex].distance < distance) {
-    upperIndex += 1;
+  let low = 0;
+  let high = samples.length - 1;
+
+  while (high - low > 1) {
+    const middle = (low + high) >> 1;
+
+    if (samples[middle].distance < distance) {
+      low = middle;
+    } else {
+      high = middle;
+    }
   }
 
-  const a = samples[Math.max(0, upperIndex - 1)];
-  const b = samples[Math.min(samples.length - 1, upperIndex)];
+  const a = samples[low];
+  const b = samples[high];
   const span = Math.max(0.0001, b.distance - a.distance);
   const alpha = clamp((distance - a.distance) / span, 0, 1);
   const tangent = normalize3({
@@ -663,8 +1038,10 @@ function interpolatedSampleAtDistance(samples: TrackSample[], distance: number):
   };
 }
 
-
-function normalizeXZ(value: { x: number; z: number }): { x: number; z: number } {
+function normalizeXZ(value: { x: number; z: number }): {
+  x: number;
+  z: number;
+} {
   const length = Math.hypot(value.x, value.z) || 1;
   return { x: value.x / length, z: value.z / length };
 }
@@ -674,19 +1051,121 @@ function createSplitSection(
   module: TrackFeatures["splitModules"][number],
   forceClosed = false,
 ): SplitSection {
-  const active = forceClosed ? 0 : naturalSplitOpenAmount(sample.distance, module);
+  const active = forceClosed
+    ? 0
+    : naturalSplitOpenAmount(sample.distance, module);
+  const t = clamp(
+    (sample.distance - module.startDistance) /
+      Math.max(module.endDistance - module.startDistance, 0.0001),
+    0,
+    1,
+  );
   const baseHalfWidth = (sample.width ?? TRACK_WIDTH) / 2;
-  const targetLaneWidth = module.laneWidth;
-  const halfGap = Math.max(0, module.laneSeparation * active * 0.5);
-  const splitHalfWidth = targetLaneWidth + halfGap;
-  const outerHalfWidth = lerp(baseHalfWidth, splitHalfWidth, active);
-  const innerHalfGap = halfGap;
+  const leftWave =
+    Math.sin(
+      t * Math.PI * 2 * module.leftProfile.curveCycles +
+        module.leftProfile.curvePhase,
+    ) * active;
+  const rightWave =
+    Math.sin(
+      t * Math.PI * 2 * module.rightProfile.curveCycles +
+        module.rightProfile.curvePhase,
+    ) * active;
+  const leftLaneWidth =
+    module.laneWidth *
+    lerp(
+      1,
+      clamp(
+        module.leftProfile.widthScale +
+          leftWave * module.leftProfile.widthWaveAmplitude * 0.14,
+        0.94,
+        1.55,
+      ),
+      active,
+    );
+  const rightLaneWidth =
+    module.laneWidth *
+    lerp(
+      1,
+      clamp(
+        module.rightProfile.widthScale +
+          rightWave * module.rightProfile.widthWaveAmplitude * 0.14,
+        0.94,
+        1.55,
+      ),
+      active,
+    );
+  const leftGap =
+    module.laneSeparation *
+    active *
+    0.5 *
+    lerp(1, clamp(module.leftProfile.separationScale, 0.75, 1.8), active);
+  const rightGap =
+    module.laneSeparation *
+    active *
+    0.5 *
+    lerp(1, clamp(module.rightProfile.separationScale, 0.75, 1.8), active);
+  const centerSway =
+    Math.sin(t * Math.PI * 2 + module.wavePhase) *
+    module.laneSeparation *
+    module.widthWaveAmplitude *
+    active *
+    0.12;
+  const leftRouteOffset = leftWave * module.leftProfile.curveAmplitude * active;
+  const rightRouteOffset =
+    rightWave * module.rightProfile.curveAmplitude * active;
+  const leftLongitudinal =
+    Math.sin(
+      t * Math.PI * 2 * module.leftProfile.curveCycles +
+        module.leftProfile.tangentPhase,
+    ) *
+    module.leftProfile.tangentAmplitude *
+    active;
+  const rightLongitudinal =
+    Math.sin(
+      t * Math.PI * 2 * module.rightProfile.curveCycles +
+        module.rightProfile.tangentPhase,
+    ) *
+    module.rightProfile.tangentAmplitude *
+    active;
+  const outerLeftOffset = lerp(
+    -baseHalfWidth,
+    centerSway - leftGap - leftLaneWidth + leftRouteOffset,
+    active,
+  );
+  const innerLeftOffset = centerSway - leftGap + leftRouteOffset;
+  const innerRightOffset = centerSway + rightGap + rightRouteOffset;
+  const outerRightOffset = lerp(
+    baseHalfWidth,
+    centerSway + rightGap + rightLaneWidth + rightRouteOffset,
+    active,
+  );
 
   return {
-    outerLeft: pointAtSampleOffset(sample, -outerHalfWidth, 0.02),
-    innerLeft: pointAtSampleOffset(sample, -innerHalfGap, 0.02),
-    innerRight: pointAtSampleOffset(sample, innerHalfGap, 0.02),
-    outerRight: pointAtSampleOffset(sample, outerHalfWidth, 0.02),
+    outerLeft: pointAtSampleOffset(
+      sample,
+      outerLeftOffset,
+      0.02,
+      leftLongitudinal,
+    ),
+    innerLeft: pointAtSampleOffset(
+      sample,
+      innerLeftOffset,
+      0.02,
+      leftLongitudinal,
+    ),
+    innerRight: pointAtSampleOffset(
+      sample,
+      innerRightOffset,
+      0.02,
+      rightLongitudinal,
+    ),
+    outerRight: pointAtSampleOffset(
+      sample,
+      outerRightOffset,
+      0.02,
+      rightLongitudinal,
+    ),
     active,
     distance: sample.distance,
   };
@@ -696,16 +1175,32 @@ function naturalSplitOpenAmount(
   distance: number,
   module: TrackFeatures["splitModules"][number],
 ): number {
-  const open = smootherstep(module.startDistance, module.laneStartDistance, distance);
-  const close = 1 - smootherstep(module.laneEndDistance, module.endDistance, distance);
+  const open = smootherstep(
+    module.startDistance,
+    module.laneStartDistance,
+    distance,
+  );
+  const close =
+    1 - smootherstep(module.laneEndDistance, module.endDistance, distance);
   return clamp(Math.min(open, close), 0, 1);
 }
 
-function pointAtSampleOffset(sample: TrackSample, offset: number, lift: number): BoundaryPoint {
+function pointAtSampleOffset(
+  sample: TrackSample,
+  offset: number,
+  lift: number,
+  longitudinalOffset = 0,
+): BoundaryPoint {
   return {
-    x: sample.x + sample.normal.x * offset,
+    x:
+      sample.x +
+      sample.normal.x * offset +
+      sample.tangent.x * longitudinalOffset,
     y: sample.y + lift + Math.sin(sample.bank ?? 0) * offset,
-    z: sample.z + sample.normal.z * offset,
+    z:
+      sample.z +
+      sample.normal.z * offset +
+      sample.tangent.z * longitudinalOffset,
   };
 }
 
@@ -714,22 +1209,51 @@ function createNaturalSplitRoadMesh(sections: SplitSection[]): TrackMeshData {
   const indices: number[] = [];
 
   for (const section of sections) {
-    pushBoundaryPoint(positions, section.outerLeft);
-    pushBoundaryPoint(positions, section.innerLeft);
-    pushBoundaryPoint(positions, section.innerRight);
-    pushBoundaryPoint(positions, section.outerRight);
+    const closedRows = splitRoadClosedRow(section);
+    for (const point of section.active < SPLIT_ISLAND_ACTIVE_THRESHOLD
+      ? closedRows
+      : splitRoadOpenRow(section)) {
+      pushBoundaryPoint(positions, point);
+    }
   }
 
+  const rowSize = 8;
+
   for (let index = 0; index < sections.length - 1; index += 1) {
-    const start = index * 4;
-    const next = start + 4;
+    const start = index * rowSize;
+    const next = start + rowSize;
     const active = Math.max(sections[index].active, sections[index + 1].active);
 
     if (active < SPLIT_ISLAND_ACTIVE_THRESHOLD) {
-      addQuad(indices, start, next, start + 3, next + 3);
+      for (let column = 0; column < rowSize - 1; column += 1) {
+        addQuad(
+          indices,
+          start + column,
+          next + column,
+          start + column + 1,
+          next + column + 1,
+        );
+      }
     } else {
-      addQuad(indices, start, next, start + 1, next + 1);
-      addQuad(indices, start + 2, next + 2, start + 3, next + 3);
+      for (let column = 0; column < 3; column += 1) {
+        addQuad(
+          indices,
+          start + column,
+          next + column,
+          start + column + 1,
+          next + column + 1,
+        );
+      }
+
+      for (let column = 4; column < 7; column += 1) {
+        addQuad(
+          indices,
+          start + column,
+          next + column,
+          start + column + 1,
+          next + column + 1,
+        );
+      }
     }
   }
 
@@ -739,11 +1263,43 @@ function createNaturalSplitRoadMesh(sections: SplitSection[]): TrackMeshData {
   };
 }
 
+function splitRoadClosedRow(section: SplitSection): BoundaryPoint[] {
+  return [
+    section.outerLeft,
+    lerpBoundaryPoint(section.outerLeft, section.outerRight, 1 / 7),
+    lerpBoundaryPoint(section.outerLeft, section.outerRight, 2 / 7),
+    lerpBoundaryPoint(section.outerLeft, section.outerRight, 3 / 7),
+    lerpBoundaryPoint(section.outerLeft, section.outerRight, 4 / 7),
+    lerpBoundaryPoint(section.outerLeft, section.outerRight, 5 / 7),
+    lerpBoundaryPoint(section.outerLeft, section.outerRight, 6 / 7),
+    section.outerRight,
+  ];
+}
+
+function splitRoadOpenRow(section: SplitSection): BoundaryPoint[] {
+  return [
+    section.outerLeft,
+    lerpBoundaryPoint(section.outerLeft, section.innerLeft, 1 / 3),
+    lerpBoundaryPoint(section.outerLeft, section.innerLeft, 2 / 3),
+    section.innerLeft,
+    section.innerRight,
+    lerpBoundaryPoint(section.innerRight, section.outerRight, 1 / 3),
+    lerpBoundaryPoint(section.innerRight, section.outerRight, 2 / 3),
+    section.outerRight,
+  ];
+}
+
 function pushBoundaryPoint(positions: number[], point: BoundaryPoint): void {
   positions.push(point.x, point.y, point.z);
 }
 
-function addQuad(indices: number[], a0: number, b0: number, a1: number, b1: number): void {
+function addQuad(
+  indices: number[],
+  a0: number,
+  b0: number,
+  a1: number,
+  b1: number,
+): void {
   indices.push(a0, b0, a1, a1, b0, b1);
 }
 
@@ -751,23 +1307,34 @@ function hasEnoughNaturalSplitClearance(
   sections: SplitSection[],
   module: TrackFeatures["splitModules"][number],
 ): boolean {
-  // This is intentionally permissive. Earlier versions rejected splits during
-  // the gradual fork/merge ramps, so the renderer cut fewer valid split areas.
-  const matureSections = sections.filter((section) => section.active > 0.5);
+  const matureSections = sections.filter((section) => section.active > 0.72);
 
-  if (matureSections.length < 2) {
+  if (matureSections.length < 4) {
     return false;
   }
 
-  const minLaneWidth = Math.max(1.75, module.laneWidth * 0.46);
-  const minIslandWidth = 0.72;
+  const minLaneWidth = Math.max(MIN_SPLIT_LANE_WIDTH, module.laneWidth * 0.86);
+  const minIslandWidth = 0.95;
 
   for (const section of matureSections) {
-    const leftLaneWidth = horizontalDistance(section.outerLeft, section.innerLeft);
-    const rightLaneWidth = horizontalDistance(section.innerRight, section.outerRight);
-    const islandWidth = horizontalDistance(section.innerLeft, section.innerRight);
+    const leftLaneWidth = horizontalDistance(
+      section.outerLeft,
+      section.innerLeft,
+    );
+    const rightLaneWidth = horizontalDistance(
+      section.innerRight,
+      section.outerRight,
+    );
+    const islandWidth = horizontalDistance(
+      section.innerLeft,
+      section.innerRight,
+    );
 
-    if (leftLaneWidth < minLaneWidth || rightLaneWidth < minLaneWidth || islandWidth < minIslandWidth) {
+    if (
+      leftLaneWidth < minLaneWidth ||
+      rightLaneWidth < minLaneWidth ||
+      islandWidth < minIslandWidth
+    ) {
       return false;
     }
   }
@@ -775,12 +1342,16 @@ function hasEnoughNaturalSplitClearance(
   return true;
 }
 
-function createRoundedSplitIslandBoundary(sections: SplitSection[]): BoundaryPoint[] {
+function createRoundedSplitIslandBoundary(
+  sections: SplitSection[],
+): BoundaryPoint[] {
   // Match the road split threshold so the island wall starts exactly where the
   // split road mesh first opens into two lanes. Keep this threshold high enough
   // to avoid needle-thin island caps that create tiny triangles and protruding
   // wall pieces at fork/merge transitions.
-  const activeSections = sections.filter((section) => section.active >= SPLIT_ISLAND_ACTIVE_THRESHOLD);
+  const activeSections = sections.filter(
+    (section) => section.active >= SPLIT_ISLAND_ACTIVE_THRESHOLD,
+  );
 
   if (activeSections.length < 4) {
     return [];
@@ -794,8 +1365,14 @@ function createRoundedSplitIslandBoundary(sections: SplitSection[]): BoundaryPoi
   const endRight = right[right.length - 1];
   const startMid = midpointBoundary(startLeft, startRight);
   const endMid = midpointBoundary(endLeft, endRight);
-  const startNextMid = midpointBoundary(left[Math.min(2, left.length - 1)], right[Math.min(2, right.length - 1)]);
-  const endPreviousMid = midpointBoundary(left[Math.max(0, left.length - 3)], right[Math.max(0, right.length - 3)]);
+  const startNextMid = midpointBoundary(
+    left[Math.min(2, left.length - 1)],
+    right[Math.min(2, right.length - 1)],
+  );
+  const endPreviousMid = midpointBoundary(
+    left[Math.max(0, left.length - 3)],
+    right[Math.max(0, right.length - 3)],
+  );
   const startTangent = normalizeBoundaryDirection(startMid, startNextMid);
   const endTangent = normalizeBoundaryDirection(endPreviousMid, endMid);
   const startGap = horizontalDistance(startLeft, startRight);
@@ -814,7 +1391,11 @@ function createRoundedSplitIslandBoundary(sections: SplitSection[]): BoundaryPoi
   ).slice(1);
   const startCap = quadraticBoundaryArc(
     startRight,
-    offsetBoundary(startMid, -startTangent.x * startBulge, -startTangent.z * startBulge),
+    offsetBoundary(
+      startMid,
+      -startTangent.x * startBulge,
+      -startTangent.z * startBulge,
+    ),
     startLeft,
     9,
   ).slice(1);
@@ -838,14 +1419,21 @@ function midpointBoundary(a: BoundaryPoint, b: BoundaryPoint): BoundaryPoint {
   };
 }
 
-function normalizeBoundaryDirection(a: BoundaryPoint, b: BoundaryPoint): { x: number; z: number } {
+function normalizeBoundaryDirection(
+  a: BoundaryPoint,
+  b: BoundaryPoint,
+): { x: number; z: number } {
   const dx = b.x - a.x;
   const dz = b.z - a.z;
   const length = Math.hypot(dx, dz) || 1;
   return { x: dx / length, z: dz / length };
 }
 
-function offsetBoundary(point: BoundaryPoint, dx: number, dz: number): BoundaryPoint {
+function offsetBoundary(
+  point: BoundaryPoint,
+  dx: number,
+  dz: number,
+): BoundaryPoint {
   return { x: point.x + dx, y: point.y, z: point.z + dz };
 }
 
@@ -870,7 +1458,11 @@ function quadraticBoundaryArc(
   return points;
 }
 
-function smoothBoundaryPath(points: BoundaryPoint[], closed: boolean, iterations: number): BoundaryPoint[] {
+function smoothBoundaryPath(
+  points: BoundaryPoint[],
+  closed: boolean,
+  iterations: number,
+): BoundaryPoint[] {
   let smoothed = dedupeBoundaryPoints(points);
 
   for (let iteration = 0; iteration < iterations; iteration += 1) {
@@ -903,7 +1495,11 @@ function smoothBoundaryPath(points: BoundaryPoint[], closed: boolean, iterations
   return smoothed;
 }
 
-function lerpBoundaryPoint(a: BoundaryPoint, b: BoundaryPoint, alpha: number): BoundaryPoint {
+function lerpBoundaryPoint(
+  a: BoundaryPoint,
+  b: BoundaryPoint,
+  alpha: number,
+): BoundaryPoint {
   return {
     x: a.x + (b.x - a.x) * alpha,
     y: a.y + (b.y - a.y) * alpha,
@@ -917,11 +1513,13 @@ function dedupeBoundaryPoints(points: BoundaryPoint[]): BoundaryPoint[] {
       return true;
     }
 
-    return Math.hypot(
-      point.x - points[index - 1].x,
-      point.y - points[index - 1].y,
-      point.z - points[index - 1].z,
-    ) > 0.04;
+    return (
+      Math.hypot(
+        point.x - points[index - 1].x,
+        point.y - points[index - 1].y,
+        point.z - points[index - 1].z,
+      ) > 0.04
+    );
   });
 }
 
@@ -938,26 +1536,48 @@ function createSplitLaneSamples(
   void rng;
   const profile = side < 0 ? module.leftProfile : module.rightProfile;
   const length = module.endDistance - module.startDistance;
-  const connectorFraction = clamp((module.laneStartDistance - module.startDistance) / Math.max(length, 0.0001), 0.26, 0.42);
+  const connectorFraction = clamp(
+    (module.laneStartDistance - module.startDistance) /
+      Math.max(length, 0.0001),
+    0.26,
+    0.42,
+  );
   const laneSamples = [
     sampleAtDistance(samples, module.startDistance),
     sampleAtDistance(samples, module.laneStartDistance),
-    ...samples.filter((sample) => sample.distance > module.startDistance && sample.distance < module.endDistance),
+    ...samples.filter(
+      (sample) =>
+        sample.distance > module.startDistance &&
+        sample.distance < module.endDistance,
+    ),
     sampleAtDistance(samples, module.laneEndDistance),
     sampleAtDistance(samples, module.endDistance),
   ]
     .sort((a, b) => a.distance - b.distance)
-    .filter((sample, index, sorted) => index === 0 || Math.abs(sample.distance - sorted[index - 1].distance) > 0.001)
+    .filter(
+      (sample, index, sorted) =>
+        index === 0 ||
+        Math.abs(sample.distance - sorted[index - 1].distance) > 0.001,
+    )
     .map((sample) => ({ ...sample }));
 
   const positionedSamples = laneSamples.map((sample) => {
-    const t = clamp((sample.distance - module.startDistance) / Math.max(length, 0.0001), 0, 1);
+    const t = clamp(
+      (sample.distance - module.startDistance) / Math.max(length, 0.0001),
+      0,
+      1,
+    );
     const peelOut = smootherstep(0, connectorFraction * profile.startEase, t);
-    const peelIn = 1 - smootherstep(1 - connectorFraction * profile.endEase, 1, t);
+    const peelIn =
+      1 - smootherstep(1 - connectorFraction * profile.endEase, 1, t);
     const envelope = peelOut * peelIn;
     const routeEnvelope = envelope;
-    const separation = module.laneSeparation * profile.separationScale * routeEnvelope;
-    const routeCurve = Math.sin(t * Math.PI * profile.curveCycles + profile.curvePhase) * profile.curveAmplitude * envelope;
+    const separation =
+      module.laneSeparation * profile.separationScale * routeEnvelope;
+    const routeCurve =
+      Math.sin(t * Math.PI * profile.curveCycles + profile.curvePhase) *
+      profile.curveAmplitude *
+      envelope;
     const tangentDrift =
       Math.sin(t * Math.PI * 2 + profile.tangentPhase) *
       profile.tangentAmplitude *
@@ -967,17 +1587,34 @@ function createSplitLaneSamples(
     const width =
       module.laneWidth * profile.widthScale +
       profile.widthWaveAmplitude * contour * envelope;
-    const blendedWidth = lerp(sample.width ?? TRACK_WIDTH, clamp(width, TRACK_WIDTH * 0.78, TRACK_WIDTH * 1.18), envelope);
+    const blendedWidth = lerp(
+      sample.width ?? TRACK_WIDTH,
+      clamp(width, MIN_SPLIT_LANE_WIDTH, TRACK_WIDTH * 1.7),
+      envelope,
+    );
 
     return {
       ...sample,
-      x: sample.x + sample.normal.x * side * (separation + routeCurve) + sample.tangent.x * tangentDrift,
-      y: sample.y - Math.sin(t * Math.PI) * length * 0.0025 + Math.sin(t * Math.PI * 2 + profile.curvePhase * 0.7) * profile.heightAmplitude * envelope,
-      z: sample.z + sample.normal.z * side * (separation + routeCurve) + sample.tangent.z * tangentDrift,
+      x:
+        sample.x +
+        sample.normal.x * side * (separation + routeCurve) +
+        sample.tangent.x * tangentDrift,
+      y:
+        sample.y -
+        Math.sin(t * Math.PI) * length * 0.0025 +
+        Math.sin(t * Math.PI * 2 + profile.curvePhase * 0.7) *
+          profile.heightAmplitude *
+          envelope,
+      z:
+        sample.z +
+        sample.normal.z * side * (separation + routeCurve) +
+        sample.tangent.z * tangentDrift,
       width: blendedWidth,
       bank: clamp(
         side * envelope * 0.08 +
-          Math.sin(t * Math.PI * 2 + profile.curvePhase) * profile.bankAmplitude * envelope,
+          Math.sin(t * Math.PI * 2 + profile.curvePhase) *
+            profile.bankAmplitude *
+            envelope,
         -0.24,
         0.24,
       ),
@@ -992,7 +1629,9 @@ function splitBranchWallSamples(
   module: TrackFeatures["splitModules"][number],
 ): TrackSample[] {
   return branchSamples.filter(
-    (sample) => sample.distance >= module.laneStartDistance && sample.distance <= module.laneEndDistance,
+    (sample) =>
+      sample.distance >= module.laneStartDistance &&
+      sample.distance <= module.laneEndDistance,
   );
 }
 
@@ -1006,7 +1645,10 @@ function recalculateSampleFrames(samples: TrackSample[]): TrackSample[] {
       z: after.z - before.z,
     });
     const flatLength = Math.hypot(tangent.x, tangent.z) || 1;
-    const flatTangent = { x: tangent.x / flatLength, z: tangent.z / flatLength };
+    const flatTangent = {
+      x: tangent.x / flatLength,
+      z: tangent.z / flatLength,
+    };
 
     return {
       ...sample,
@@ -1017,15 +1659,36 @@ function recalculateSampleFrames(samples: TrackSample[]): TrackSample[] {
   });
 }
 
-function createSplitModules(rng: () => number, finishDistance: number, samples: TrackSample[]): TrackFeatures["splitModules"] {
-  const maxByLength = Math.max(1, Math.floor(finishDistance / 165));
-  const desiredByLength = finishDistance > 520 ? 4 : finishDistance > 360 ? 3 : finishDistance > 230 ? 2 : 1;
-  const count = Math.min(5, maxByLength + 1, desiredByLength + (rng() < 0.35 ? 1 : 0));
+function createSplitModules(
+  rng: () => number,
+  finishDistance: number,
+  samples: TrackSample[],
+): TrackFeatures["splitModules"] {
+  const maxByLength = Math.max(1, Math.floor(finishDistance / 125));
+  const desiredByLength =
+    finishDistance > 720
+      ? 6
+      : finishDistance > 520
+        ? 5
+        : finishDistance > 360
+          ? 4
+          : finishDistance > 230
+            ? 3
+            : 2;
+  const count = Math.min(
+    7,
+    maxByLength + 2,
+    desiredByLength + (rng() < 0.6 ? 1 : 0),
+  );
   const modules: TrackFeatures["splitModules"] = [];
 
-  for (let attempt = 0; attempt < count * 140 && modules.length < count; attempt += 1) {
-    const length = clamp(finishDistance * (0.12 + rng() * 0.12), 76, 160);
-    const startDistance = finishDistance * (0.1 + rng() * 0.74);
+  for (
+    let attempt = 0;
+    attempt < count * 220 && modules.length < count;
+    attempt += 1
+  ) {
+    const length = randomSplitLength(rng, finishDistance);
+    const startDistance = finishDistance * (0.07 + rng() * 0.82);
     const endDistance = startDistance + length;
 
     if (endDistance > finishDistance - 18) {
@@ -1033,24 +1696,37 @@ function createSplitModules(rng: () => number, finishDistance: number, samples: 
     }
 
     const startSample = sampleAtDistance(samples, startDistance);
-    const middleSample = sampleAtDistance(samples, (startDistance + endDistance) / 2);
+    const middleSample = sampleAtDistance(
+      samples,
+      (startDistance + endDistance) / 2,
+    );
     const endSample = sampleAtDistance(samples, endDistance);
     const hasEnoughSpace =
-      (startSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.58 &&
-      (middleSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.58 &&
-      (endSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.58;
-    const splitIsStraightEnough = isBranchSectionSafeRelaxed(samples, startDistance, endDistance);
+      (startSample.width ?? TRACK_WIDTH) >= MIN_MAIN_TRACK_WIDTH &&
+      (middleSample.width ?? TRACK_WIDTH) >= MIN_MAIN_TRACK_WIDTH &&
+      (endSample.width ?? TRACK_WIDTH) >= MIN_MAIN_TRACK_WIDTH;
+    const splitIsStraightEnough = isBranchSectionSafeRelaxed(
+      samples,
+      startDistance,
+      endDistance,
+    );
     const separated = modules.every(
-      (module) => endDistance < module.startDistance - 34 || startDistance > module.endDistance + 34,
+      (module) =>
+        endDistance < module.startDistance - 22 ||
+        startDistance > module.endDistance + 22,
     );
 
     if (!hasEnoughSpace || !splitIsStraightEnough || !separated) {
       continue;
     }
 
-    const laneWidth = TRACK_WIDTH * (0.78 + rng() * 0.15);
-    const endpointOverlap = clamp(length * 0.22, 18, 38);
-    const laneSeparation = laneWidth * (0.82 + rng() * 0.18) + 1.8 + rng() * 1.6;
+    const laneWidth = TRACK_WIDTH * (1.08 + rng() * 0.34);
+    const endpointOverlap = clamp(length * (0.16 + rng() * 0.08), 14, 44);
+    const laneSeparation =
+      laneWidth * (0.95 + rng() * 0.5) +
+      1.7 +
+      rng() * 2.6 +
+      (rng() < 0.28 ? 2.2 + rng() * 4.8 : 0);
     const module = {
       startDistance,
       endDistance,
@@ -1062,7 +1738,7 @@ function createSplitModules(rng: () => number, finishDistance: number, samples: 
       waveCycles: 1,
       wavePhase: rng() * Math.PI * 2,
       widthScale: 1,
-      widthWaveAmplitude: 0,
+      widthWaveAmplitude: rng() < 0.42 ? 0 : 0.5 + rng() * 1.05,
       bankAmplitude: 0,
       heightAmplitude: 0,
       widthBoost: 0,
@@ -1073,7 +1749,10 @@ function createSplitModules(rng: () => number, finishDistance: number, samples: 
     const leftBranch = createSplitLaneSamples(samples, module, -1, rng);
     const rightBranch = createSplitLaneSamples(samples, module, 1, rng);
 
-    if (!isSplitRoutePairSafe(samples, leftBranch, rightBranch, module) && rng() < 0.18) {
+    if (
+      !isSplitRoutePairSafe(samples, leftBranch, rightBranch, module) &&
+      rng() < 0.18
+    ) {
       continue;
     }
 
@@ -1081,9 +1760,13 @@ function createSplitModules(rng: () => number, finishDistance: number, samples: 
   }
 
   if (modules.length < count && count > 0) {
-    for (let attempt = 0; attempt < 100 && modules.length < count; attempt += 1) {
-      const length = clamp(finishDistance * (0.1 + rng() * 0.14), 72, 150);
-      const startDistance = finishDistance * (0.1 + rng() * 0.75);
+    for (
+      let attempt = 0;
+      attempt < 180 && modules.length < count;
+      attempt += 1
+    ) {
+      const length = randomSplitLength(rng, finishDistance);
+      const startDistance = finishDistance * (0.07 + rng() * 0.83);
       const endDistance = startDistance + length;
 
       if (endDistance > finishDistance - 18) {
@@ -1091,24 +1774,33 @@ function createSplitModules(rng: () => number, finishDistance: number, samples: 
       }
 
       const startSample = sampleAtDistance(samples, startDistance);
-      const middleSample = sampleAtDistance(samples, (startDistance + endDistance) / 2);
+      const middleSample = sampleAtDistance(
+        samples,
+        (startDistance + endDistance) / 2,
+      );
       const endSample = sampleAtDistance(samples, endDistance);
       const hasEnoughSpace =
-        (startSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.55 &&
-        (middleSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.55 &&
-        (endSample.width ?? TRACK_WIDTH) >= TRACK_WIDTH * 0.55;
+        (startSample.width ?? TRACK_WIDTH) >= MIN_MAIN_TRACK_WIDTH &&
+        (middleSample.width ?? TRACK_WIDTH) >= MIN_MAIN_TRACK_WIDTH &&
+        (endSample.width ?? TRACK_WIDTH) >= MIN_MAIN_TRACK_WIDTH;
 
       const separated = modules.every(
-        (module) => endDistance < module.startDistance - 30 || startDistance > module.endDistance + 30,
+        (module) =>
+          endDistance < module.startDistance - 20 ||
+          startDistance > module.endDistance + 20,
       );
 
       if (!hasEnoughSpace || !separated) {
         continue;
       }
 
-      const laneWidth = TRACK_WIDTH * (0.76 + rng() * 0.16);
-      const endpointOverlap = clamp(length * 0.22, 18, 36);
-      const laneSeparation = laneWidth * (0.8 + rng() * 0.18) + 1.7 + rng() * 1.5;
+      const laneWidth = TRACK_WIDTH * (1.06 + rng() * 0.32);
+      const endpointOverlap = clamp(length * (0.16 + rng() * 0.08), 14, 42);
+      const laneSeparation =
+        laneWidth * (0.92 + rng() * 0.48) +
+        1.6 +
+        rng() * 2.4 +
+        (rng() < 0.24 ? 2 + rng() * 4.4 : 0);
       const module = {
         startDistance,
         endDistance,
@@ -1120,7 +1812,7 @@ function createSplitModules(rng: () => number, finishDistance: number, samples: 
         waveCycles: 1,
         wavePhase: rng() * Math.PI * 2,
         widthScale: 1,
-        widthWaveAmplitude: 0,
+        widthWaveAmplitude: rng() < 0.42 ? 0 : 0.48 + rng() * 0.95,
         bankAmplitude: 0,
         heightAmplitude: 0,
         widthBoost: 0,
@@ -1135,31 +1827,49 @@ function createSplitModules(rng: () => number, finishDistance: number, samples: 
   return modules.sort((a, b) => a.startDistance - b.startDistance);
 }
 
-function createSplitLaneProfile(rng: () => number, side: -1 | 1): SplitLaneProfile {
+function randomSplitLength(rng: () => number, finishDistance: number): number {
+  const range = Math.pow(rng(), 1.08) * 0.24;
+  const longTail = Math.pow(rng(), 4) * 0.14;
+  return clamp(finishDistance * (0.055 + range + longTail), 44, 300);
+}
+
+function createSplitLaneProfile(
+  rng: () => number,
+  side: -1 | 1,
+): SplitLaneProfile {
+  const bend = Math.pow(rng(), 1.45);
+  const tangent = Math.pow(rng(), 1.65);
+  const widthNoise = Math.pow(rng(), 0.85);
+
   return {
-    startEase: 0.92 + rng() * 0.16,
-    endEase: 0.92 + rng() * 0.16,
-    separationScale: 0.98 + rng() * 0.08,
-    curveAmplitude: rng() < 0.72 ? 0 : 0.25 + rng() * 0.75,
-    curveCycles: rng() < 0.5 ? 1 : 1.5,
-    curvePhase: rng() * Math.PI * 2 + side * (0.35 + rng() * 0.75),
-    tangentAmplitude: rng() < 0.72 ? 0 : 0.2 + rng() * 0.55,
+    startEase: 0.72 + rng() * 0.52,
+    endEase: 0.72 + rng() * 0.52,
+    separationScale: 0.68 + rng() * 1.18,
+    curveAmplitude: bend * 3.15,
+    curveCycles: 0.35 + rng() * 3.0,
+    curvePhase: rng() * Math.PI * 2 + side * rng() * 0.9,
+    tangentAmplitude: tangent * 2.35,
     tangentPhase: rng() * Math.PI * 2,
-    widthScale: 0.94 + rng() * 0.12,
-    widthWaveAmplitude: 0.05 + rng() * 0.2,
-    bankAmplitude: 0.012 + rng() * 0.025,
-    heightAmplitude: 0.005 + rng() * 0.025,
+    widthScale: 0.96 + widthNoise * 0.38,
+    widthWaveAmplitude: Math.pow(rng(), 1.18) * 0.28,
+    bankAmplitude: 0.008 + rng() * 0.058,
+    heightAmplitude: 0.003 + rng() * 0.052,
   };
 }
 
-function isBranchSectionSafe(samples: TrackSample[], startDistance: number, endDistance: number): boolean {
+function isBranchSectionSafe(
+  samples: TrackSample[],
+  startDistance: number,
+  endDistance: number,
+): boolean {
   const sampleCount = 8;
   let previous = sampleAtDistance(samples, startDistance);
   let yawDrift = 0;
   let pitchDrift = 0;
 
   for (let index = 1; index <= sampleCount; index += 1) {
-    const distance = startDistance + ((endDistance - startDistance) * index) / sampleCount;
+    const distance =
+      startDistance + ((endDistance - startDistance) * index) / sampleCount;
     const current = sampleAtDistance(samples, distance);
     yawDrift += Math.abs(wrapAngle(current.yaw - previous.yaw));
     pitchDrift += Math.abs(current.tangent.y - previous.tangent.y);
@@ -1169,14 +1879,19 @@ function isBranchSectionSafe(samples: TrackSample[], startDistance: number, endD
   return yawDrift < 1.15 && pitchDrift < 0.55;
 }
 
-function isBranchSectionSafeRelaxed(samples: TrackSample[], startDistance: number, endDistance: number): boolean {
+function isBranchSectionSafeRelaxed(
+  samples: TrackSample[],
+  startDistance: number,
+  endDistance: number,
+): boolean {
   const sampleCount = 8;
   let previous = sampleAtDistance(samples, startDistance);
   let yawDrift = 0;
   let pitchDrift = 0;
 
   for (let index = 1; index <= sampleCount; index += 1) {
-    const distance = startDistance + ((endDistance - startDistance) * index) / sampleCount;
+    const distance =
+      startDistance + ((endDistance - startDistance) * index) / sampleCount;
     const current = sampleAtDistance(samples, distance);
     yawDrift += Math.abs(wrapAngle(current.yaw - previous.yaw));
     pitchDrift += Math.abs(current.tangent.y - previous.tangent.y);
@@ -1195,17 +1910,29 @@ function isSplitRoutePairSafe(
   void mainSamples;
   const length = module.endDistance - module.startDistance;
 
-  if (hasBadTrackGeometry(leftBranch, length) || hasBadTrackGeometry(rightBranch, length)) {
+  if (
+    hasBadTrackGeometry(leftBranch, length) ||
+    hasBadTrackGeometry(rightBranch, length)
+  ) {
     return false;
   }
 
   for (let index = 3; index < leftBranch.length - 3; index += 6) {
     const left = leftBranch[index];
     const right = rightBranch[index];
-    const t = clamp((left.distance - module.startDistance) / Math.max(length, 0.0001), 0, 1);
-    const expectedGap = ((left.width ?? TRACK_WIDTH) + (right.width ?? TRACK_WIDTH)) / 2 + 1.4;
+    const t = clamp(
+      (left.distance - module.startDistance) / Math.max(length, 0.0001),
+      0,
+      1,
+    );
+    const expectedGap =
+      ((left.width ?? TRACK_WIDTH) + (right.width ?? TRACK_WIDTH)) / 2 + 1.4;
 
-    if (Math.hypot(left.x - right.x, left.z - right.z) < expectedGap && t > 0.12 && t < 0.88) {
+    if (
+      Math.hypot(left.x - right.x, left.z - right.z) < expectedGap &&
+      t > 0.12 &&
+      t < 0.88
+    ) {
       return false;
     }
   }
@@ -1213,169 +1940,721 @@ function isSplitRoutePairSafe(
   return true;
 }
 
-function createFeatures(samples: TrackSample[], mapRng: () => number, rng: () => number, finishDistance: number): TrackFeatures {
-  const reserved: Array<{ distance: number; radius: number }> = [];
-
+function createFeatures(
+  samples: TrackSample[],
+  mapRng: () => number,
+  rng: () => number,
+  finishDistance: number,
+): TrackFeatures {
+  void rng;
   const wideZones: TrackFeatures["wideZones"] = [
-    { startDistance: finishDistance * (0.08 + mapRng() * 0.06), endDistance: finishDistance * (0.2 + mapRng() * 0.08), extraWidth: 0.4 + mapRng() * 2.5, kind: "funnel" },
-    { startDistance: finishDistance * (0.32 + mapRng() * 0.12), endDistance: finishDistance * (0.48 + mapRng() * 0.12), extraWidth: -1.1 + mapRng() * 4.4, kind: "bowl" },
-    { startDistance: finishDistance * (0.62 + mapRng() * 0.1), endDistance: finishDistance * (0.78 + mapRng() * 0.08), extraWidth: -1.35 + mapRng() * 4.1, kind: "split" },
+    {
+      startDistance: finishDistance * (0.08 + mapRng() * 0.06),
+      endDistance: finishDistance * (0.2 + mapRng() * 0.08),
+      extraWidth: 0.4 + mapRng() * 2.5,
+      kind: "funnel",
+    },
+    {
+      startDistance: finishDistance * (0.32 + mapRng() * 0.12),
+      endDistance: finishDistance * (0.48 + mapRng() * 0.12),
+      extraWidth: -0.35 + mapRng() * 3.2,
+      kind: "bowl",
+    },
+    {
+      startDistance: finishDistance * (0.62 + mapRng() * 0.1),
+      endDistance: finishDistance * (0.78 + mapRng() * 0.08),
+      extraWidth: 1.2 + mapRng() * 4.4,
+      kind: "split",
+    },
   ];
-  const extraWidthZones = 2 + Math.floor(mapRng() * 5);
+  const extraWidthZones = 4 + Math.floor(mapRng() * 7);
 
   for (let index = 0; index < extraWidthZones; index += 1) {
     const start = finishDistance * (0.08 + mapRng() * 0.78);
     const length = finishDistance * (0.035 + mapRng() * 0.14);
+    const splitBiased = mapRng() < 0.55;
 
     wideZones.push({
       startDistance: start,
       endDistance: Math.min(finishDistance * 0.96, start + length),
-      extraWidth: -1.75 + mapRng() * 4.6,
-      kind: mapRng() < 0.34 ? "funnel" : mapRng() < 0.67 ? "bowl" : "split",
+      extraWidth: splitBiased ? 1.0 + mapRng() * 4.2 : -0.45 + mapRng() * 3.4,
+      kind: splitBiased ? "split" : mapRng() < 0.5 ? "funnel" : "bowl",
     });
   }
 
   const splitModules = createSplitModules(mapRng, finishDistance, samples);
   for (const module of splitModules) {
-    const length = module.endDistance - module.startDistance;
-    const markerCount = Math.max(3, Math.ceil(length / 34));
-
-    for (let marker = 0; marker <= markerCount; marker += 1) {
-      reserved.push({
-        distance: lerp(module.startDistance, module.endDistance, marker / markerCount),
-        radius: 15,
-      });
-    }
+    wideZones.push({
+      startDistance: Math.max(0, module.startDistance - 10),
+      endDistance: Math.min(finishDistance * 0.97, module.endDistance + 10),
+      extraWidth: 1.1 + mapRng() * 3.2,
+      kind: "split",
+    });
   }
-
-  const mix = chooseObstacleMix(rng);
-  const lengthScale = clamp(finishDistance / 650, 0.85, 1.35);
-  const densityScale = 0.42 + rng() * 1.18;
-  const endZoneBias = 0;
-
-  const gates = pickFeatureDistances(
-    rng,
-    finishDistance,
-    mix.gates ? Math.round((1 + Math.floor(rng() * 4)) * densityScale) : 0,
-    2.25,
-    reserved,
-    samples,
-    true,
-    endZoneBias,
-  ).map((distance) => ({
-    distance,
-    phase: rng() * 20,
-  }));
-  const trappers = pickFeatureDistances(
-    rng,
-    finishDistance,
-    rng() < 0.72 ? Math.round((1 + Math.floor(rng() * 3)) * densityScale) : 0,
-    3.1,
-    reserved,
-    samples,
-    true,
-    0,
-  ).map((distance) => ({
-    distance,
-    phase: rng() * 18,
-    radius: 0.95 + rng() * 0.45,
-  }));
-  const spinners = pickFeatureDistances(
-    rng,
-    finishDistance,
-    mix.spinners ? Math.round((1 + Math.floor(rng() * 6)) * densityScale) : 0,
-    2.0,
-    reserved,
-    samples,
-    true,
-    endZoneBias,
-  ).map((distance) => ({
-    distance,
-    phase: rng() * Math.PI * 2,
-    speed: (rng() < 0.5 ? -1 : 1) * (0.7 + rng() * 0.9),
-  }));
-  const hammers = pickFeatureDistances(
-    rng,
-    finishDistance,
-    mix.hammers ? Math.round((1 + Math.floor(rng() * 4)) * densityScale) : 0,
-    2.45,
-    reserved,
-    samples,
-    true,
-    endZoneBias,
-  ).map((distance) => ({
-    distance,
-    phase: rng() * Math.PI * 2,
-    side: (rng() < 0.5 ? -1 : 1) as -1 | 1,
-  }));
-  const turnstiles = pickFeatureDistances(
-    rng,
-    finishDistance,
-    mix.turnstiles ? Math.round((1 + Math.floor(rng() * 4)) * densityScale) : 0,
-    2.25,
-    reserved,
-    samples,
-    true,
-    endZoneBias,
-  ).map((distance) => ({
-    distance,
-    phase: rng() * Math.PI * 2,
-    speed: (rng() < 0.5 ? -1 : 1) * (0.28 + rng() * 0.22),
-  }));
-  const missingWallSegments = pickFeatureDistances(
-    rng,
-    finishDistance,
-    mix.missingWallSegments ? Math.round((3 + Math.floor(rng() * 8)) * densityScale) : 0,
-    4.4,
-    reserved,
-    samples,
-    true,
-    0.18,
-  ).map((distance) => ({
-    distance,
-    length: 2.8 + rng() * 3.4,
-    side: (rng() < 0.5 ? -1 : 1) as -1 | 1,
-  }));
-  const greenBumpers = pickFeatureDistances(
-    rng,
-    finishDistance,
-    Math.round((5 + Math.floor(rng() * 22)) * lengthScale * densityScale),
-    0.82,
-    reserved,
-    samples,
-    false,
-    0,
-  ).map((distance) => ({
-    distance,
-    offset: (rng() < 0.5 ? -1 : 1) * (0.35 + rng() * 1.15),
-    radius: 0.28 + rng() * 0.08,
-  }));
-  const pegCount = Math.round((6 + Math.floor(rng() * 21)) * lengthScale * densityScale);
-  const pegs: TrackFeatures["pegs"] = pickPegDistances(rng, finishDistance, pegCount, reserved, samples).map((distance, index) => {
-    const side = index % 2 === 0 ? -1 : 1;
-
-    return {
-      distance,
-      offset: side * (0.45 + rng() * 1.2),
-      radius: 0.17 + rng() * 0.045,
-      phase: rng() * PEG_MOTION_PERIOD,
-    };
-  });
-  const powerups = createPowerups(rng, finishDistance, reserved, samples);
 
   return {
     wideZones,
-    pegs,
-    greenBumpers,
-    gates,
-    trappers,
-    spinners,
-    hammers,
-    turnstiles,
-    missingWallSegments,
-    powerups,
+    pegs: [],
+    greenBumpers: [],
+    gates: [],
+    trappers: [],
+    spinners: [],
+    hammers: [],
+    turnstiles: [],
+    powerups: [],
     splitModules,
   };
+}
+
+type CourseFeatureRoute = {
+  id: string;
+  samples: TrackSample[];
+  startDistance: number;
+  endDistance: number;
+  weight: number;
+};
+
+type FeatureReservation = {
+  routeId: string;
+  distance: number;
+  radius: number;
+  x: number;
+  y: number;
+  z: number;
+};
+
+type FeaturePlacement = {
+  route: CourseFeatureRoute;
+  distance: number;
+  offset: number;
+  routeOffset: number;
+  mainOffset: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  width: number;
+};
+
+function featurePlacementFields(placement: FeaturePlacement): {
+  distance: number;
+  offset: number;
+  routeId: string;
+  routeOffset: number;
+  mainOffset: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  width: number;
+} {
+  return {
+    distance: placement.distance,
+    offset: placement.routeOffset,
+    routeId: placement.route.id,
+    routeOffset: placement.routeOffset,
+    mainOffset: placement.mainOffset,
+    x: placement.x,
+    y: placement.y,
+    z: placement.z,
+    yaw: placement.yaw,
+    width: placement.width,
+  };
+}
+
+function populateCourseFeatures(
+  features: TrackFeatures,
+  samples: TrackSample[],
+  branches: TrackDefinition["branches"],
+  splitSurfaces: SplitSurface[],
+  rng: () => number,
+  finishDistance: number,
+): void {
+  const routes = createFeatureRoutes(
+    samples,
+    branches,
+    splitSurfaces,
+    finishDistance,
+  );
+  const reserved: FeatureReservation[] = [];
+  const mix = chooseObstacleMix(rng);
+  const lengthScale = clamp(finishDistance / 650, 0.85, 1.75);
+  const densityScale = 0.48 + rng() * 1.08;
+  const obstacleDensityScale = clamp(lengthScale * densityScale, 0.72, 2.05);
+  const powerupKinds: PowerupKind[] = [
+    "speed",
+    "giant",
+    "tiny",
+    "ghost",
+    "slow",
+    "barrier",
+    "smash",
+  ];
+
+  for (const placement of placeCourseFeatures(
+    rng,
+    routes,
+    reserved,
+    mix.gates
+      ? Math.round((1 + Math.floor(rng() * 4)) * obstacleDensityScale)
+      : 0,
+    4.9,
+    samples,
+    centerOffset,
+  )) {
+    features.gates.push({
+      ...featurePlacementFields(placement),
+      phase: rng() * 20,
+    });
+  }
+
+  for (const placement of placeCourseFeatures(
+    rng,
+    routes,
+    reserved,
+    rng() < 0.72
+      ? Math.round((1 + Math.floor(rng() * 3)) * obstacleDensityScale)
+      : 0,
+    5.4,
+    samples,
+    centerOffset,
+  )) {
+    features.trappers.push({
+      ...featurePlacementFields(placement),
+      phase: rng() * 18,
+      radius: 0.95 + rng() * 0.45,
+    });
+  }
+
+  for (const placement of placeCourseFeatures(
+    rng,
+    routes,
+    reserved,
+    mix.spinners
+      ? Math.round((1 + Math.floor(rng() * 6)) * obstacleDensityScale)
+      : 0,
+    4.4,
+    samples,
+    centerOffset,
+  )) {
+    features.spinners.push({
+      ...featurePlacementFields(placement),
+      phase: rng() * Math.PI * 2,
+      speed: (rng() < 0.5 ? -1 : 1) * (0.7 + rng() * 0.9),
+    });
+  }
+
+  for (const placement of placeCourseFeatures(
+    rng,
+    routes,
+    reserved,
+    mix.hammers
+      ? Math.round((1 + Math.floor(rng() * 4)) * obstacleDensityScale)
+      : 0,
+    4.8,
+    samples,
+    laneSideOffset(rng, 0.35, 0.9),
+  )) {
+    features.hammers.push({
+      ...featurePlacementFields(placement),
+      phase: rng() * Math.PI * 2,
+      side: (rng() < 0.5 ? -1 : 1) as -1 | 1,
+    });
+  }
+
+  for (const placement of placeCourseFeatures(
+    rng,
+    routes,
+    reserved,
+    mix.turnstiles
+      ? Math.round((1 + Math.floor(rng() * 4)) * obstacleDensityScale)
+      : 0,
+    4.8,
+    samples,
+    centerOffset,
+  )) {
+    features.turnstiles.push({
+      ...featurePlacementFields(placement),
+      phase: rng() * Math.PI * 2,
+      speed: (rng() < 0.5 ? -1 : 1) * (0.28 + rng() * 0.22),
+    });
+  }
+
+  for (const placement of placeCourseFeatures(
+    rng,
+    routes,
+    reserved,
+    Math.round((5 + Math.floor(rng() * 22)) * lengthScale * densityScale),
+    1.8,
+    samples,
+    laneSideOffset(rng, 0.35, 1.15),
+  )) {
+    features.greenBumpers.push({
+      ...featurePlacementFields(placement),
+      radius: 0.28 + rng() * 0.08,
+    });
+  }
+
+  for (const placement of placeCourseFeatures(
+    rng,
+    routes,
+    reserved,
+    Math.round((6 + Math.floor(rng() * 21)) * lengthScale * densityScale),
+    1.55,
+    samples,
+    alternatingLaneOffset(0.45, 1.2),
+  )) {
+    features.pegs.push({
+      ...featurePlacementFields(placement),
+      radius: 0.17 + rng() * 0.045,
+      phase: rng() * PEG_MOTION_PERIOD,
+    });
+  }
+
+  for (const [index, placement] of placeCourseFeatures(
+    rng,
+    routes,
+    reserved,
+    5 + Math.floor(rng() * 7),
+    3.4,
+    samples,
+    randomPowerupOffset(rng),
+  ).entries()) {
+    features.powerups.push({
+      id: `powerup-${index + 1}`,
+      ...featurePlacementFields(placement),
+      kind: powerupKinds[Math.floor(rng() * powerupKinds.length)] ?? "speed",
+    });
+  }
+
+  sortFeaturesByDistance(features);
+}
+
+function createFeatureRoutes(
+  samples: TrackSample[],
+  branches: TrackDefinition["branches"],
+  splitSurfaces: SplitSurface[],
+  finishDistance: number,
+): CourseFeatureRoute[] {
+  void branches;
+  const routes: CourseFeatureRoute[] = [];
+  const splitRanges = splitSurfaces
+    .map((surface) => ({
+      start: Math.max(12, surface.startDistance + 8),
+      end: Math.min(finishDistance - 18, surface.endDistance - 8),
+    }))
+    .filter((range) => range.end - range.start > 22)
+    .sort((a, b) => a.start - b.start);
+  let mainStart = 12;
+  let mainIndex = 0;
+
+  for (const range of splitRanges) {
+    addFeatureRoute(
+      routes,
+      `main-${mainIndex}`,
+      samples,
+      mainStart,
+      Math.min(range.start, finishDistance - 18),
+      1,
+    );
+    mainStart = Math.max(mainStart, range.end);
+    mainIndex += 1;
+  }
+
+  addFeatureRoute(
+    routes,
+    `main-${mainIndex}`,
+    samples,
+    mainStart,
+    finishDistance - 18,
+    1,
+  );
+
+  for (const [index, surface] of splitSurfaces.entries()) {
+    const length = surface.endDistance - surface.startDistance;
+    const margin = clamp(Math.max(12, length * 0.18), 12, 34);
+    const start = Math.max(12, surface.startDistance + margin);
+    const end = Math.min(finishDistance - 18, surface.endDistance - margin);
+
+    if (end - start <= 22) {
+      continue;
+    }
+
+    addFeatureRoute(
+      routes,
+      `split-${index}-left`,
+      splitSurfaceLaneSamples(surface, -1),
+      start,
+      end,
+      0.72,
+    );
+    addFeatureRoute(
+      routes,
+      `split-${index}-right`,
+      splitSurfaceLaneSamples(surface, 1),
+      start,
+      end,
+      0.72,
+    );
+  }
+
+  return routes.filter((route) => route.endDistance - route.startDistance > 18);
+}
+
+function splitSurfaceLaneSamples(
+  surface: SplitSurface,
+  side: -1 | 1,
+): TrackSample[] {
+  const rowSize = 8;
+  const vertices = surface.road.vertices;
+  const rowCount = Math.floor(vertices.length / (rowSize * 3));
+  const samples: TrackSample[] = [];
+
+  if (rowCount <= 0) {
+    return samples;
+  }
+
+  const leftColumn = side < 0 ? 0 : 4;
+  const rightColumn = side < 0 ? 3 : 7;
+
+  for (let row = 0; row < rowCount; row += 1) {
+    const distance = lerp(
+      surface.startDistance,
+      surface.endDistance,
+      rowCount <= 1 ? 0 : row / (rowCount - 1),
+    );
+    const previousRow = Math.max(0, row - 1);
+    const nextRow = Math.min(rowCount - 1, row + 1);
+    const left = splitSurfaceVertex(vertices, row, leftColumn, rowSize);
+    const right = splitSurfaceVertex(vertices, row, rightColumn, rowSize);
+    const previousCenter = midpointBoundary(
+      splitSurfaceVertex(vertices, previousRow, leftColumn, rowSize),
+      splitSurfaceVertex(vertices, previousRow, rightColumn, rowSize),
+    );
+    const nextCenter = midpointBoundary(
+      splitSurfaceVertex(vertices, nextRow, leftColumn, rowSize),
+      splitSurfaceVertex(vertices, nextRow, rightColumn, rowSize),
+    );
+    const center = midpointBoundary(left, right);
+    const tangent = normalize3({
+      x: nextCenter.x - previousCenter.x,
+      y: nextCenter.y - previousCenter.y,
+      z: nextCenter.z - previousCenter.z,
+    });
+    const normal = normalizeXZ({ x: right.x - left.x, z: right.z - left.z });
+    const width = Math.max(0.1, Math.hypot(right.x - left.x, right.z - left.z));
+
+    samples.push({
+      x: center.x,
+      y: center.y,
+      z: center.z,
+      distance,
+      tangent,
+      normal,
+      yaw: Math.atan2(tangent.x, tangent.z),
+      width,
+      bank: Math.asin(clamp((right.y - left.y) / width, -0.35, 0.35)),
+      surfaceFriction: 0.18,
+    });
+  }
+
+  return samples;
+}
+
+function splitSurfaceVertex(
+  vertices: Float32Array,
+  row: number,
+  column: number,
+  rowSize: number,
+): BoundaryPoint {
+  const offset = (row * rowSize + column) * 3;
+  return {
+    x: vertices[offset],
+    y: vertices[offset + 1],
+    z: vertices[offset + 2],
+  };
+}
+
+function addFeatureRoute(
+  routes: CourseFeatureRoute[],
+  id: string,
+  sourceSamples: TrackSample[],
+  startDistance: number,
+  endDistance: number,
+  weightScale: number,
+): void {
+  if (endDistance - startDistance <= 18 || sourceSamples.length < 2) {
+    return;
+  }
+
+  const clipped = clipRouteSamples(sourceSamples, startDistance, endDistance);
+  const safeSamples = clipped.filter(
+    (sample) => (sample.width ?? TRACK_WIDTH) >= MIN_FEATURE_ROUTE_WIDTH,
+  );
+
+  if (safeSamples.length < 2) {
+    return;
+  }
+
+  const safeStart = Math.max(startDistance, safeSamples[0].distance + 2);
+  const safeEnd = Math.min(
+    endDistance,
+    safeSamples[safeSamples.length - 1].distance - 2,
+  );
+
+  if (safeEnd - safeStart <= 18) {
+    return;
+  }
+
+  routes.push({
+    id,
+    samples: clipRouteSamples(sourceSamples, safeStart, safeEnd),
+    startDistance: safeStart,
+    endDistance: safeEnd,
+    weight: Math.max(1, safeEnd - safeStart) * weightScale,
+  });
+}
+
+function clipRouteSamples(
+  samples: TrackSample[],
+  startDistance: number,
+  endDistance: number,
+): TrackSample[] {
+  return [
+    sampleAtDistance(samples, startDistance),
+    ...samples.filter(
+      (sample) =>
+        sample.distance > startDistance && sample.distance < endDistance,
+    ),
+    sampleAtDistance(samples, endDistance),
+  ];
+}
+
+function placeCourseFeatures(
+  rng: () => number,
+  routes: CourseFeatureRoute[],
+  reserved: FeatureReservation[],
+  count: number,
+  radius: number,
+  mainSamples: TrackSample[],
+  localOffsetForSample: (sample: TrackSample, index: number) => number,
+): FeaturePlacement[] {
+  if (count <= 0 || routes.length === 0) {
+    return [];
+  }
+
+  const placements: FeaturePlacement[] = [];
+  const slots = shuffleStrings(
+    Array.from({ length: count }, (_, index) => index),
+    rng,
+  );
+  const maxAttempts = Math.max(80, count * 95);
+
+  for (
+    let attempt = 0;
+    attempt < maxAttempts && placements.length < count;
+    attempt += 1
+  ) {
+    const slot = slots[placements.length % slots.length] ?? placements.length;
+    const progress = (slot + 0.12 + rng() * 0.76) / count;
+    const route = routeAtWeightedProgress(
+      routes,
+      (progress + attempt * 0.38196601125) % 1,
+    );
+    const distance = lerp(route.startDistance, route.endDistance, rng());
+    const routeSample = sampleAtDistance(route.samples, distance);
+
+    if (!isRouteFeatureSafe(route.samples, distance)) {
+      continue;
+    }
+
+    const localOffset = clamp(
+      localOffsetForSample(routeSample, placements.length),
+      -maxFeatureOffset(routeSample, radius),
+      maxFeatureOffset(routeSample, radius),
+    );
+    const placement = createFeaturePlacement(
+      route,
+      distance,
+      localOffset,
+      mainSamples,
+    );
+
+    if (!hasFeatureClearance(placement, radius, reserved)) {
+      continue;
+    }
+
+    placements.push(placement);
+    reserved.push({
+      routeId: route.id,
+      distance,
+      radius,
+      x: placement.x,
+      y: placement.y,
+      z: placement.z,
+    });
+  }
+
+  return placements.sort((a, b) => a.distance - b.distance);
+}
+
+function routeAtWeightedProgress(
+  routes: CourseFeatureRoute[],
+  progress: number,
+): CourseFeatureRoute {
+  const total = routes.reduce((sum, route) => sum + route.weight, 0);
+  let cursor = clamp(progress, 0, 0.999999) * total;
+
+  for (const route of routes) {
+    cursor -= route.weight;
+    if (cursor <= 0) {
+      return route;
+    }
+  }
+
+  return routes[routes.length - 1];
+}
+
+function createFeaturePlacement(
+  route: CourseFeatureRoute,
+  distance: number,
+  localOffset: number,
+  mainSamples: TrackSample[],
+): FeaturePlacement {
+  const routeSample = sampleAtDistance(route.samples, distance);
+  const mainSample = sampleAtDistance(mainSamples, distance);
+  const dx = routeSample.x - mainSample.x;
+  const dz = routeSample.z - mainSample.z;
+  const routeCenterOffset = dx * mainSample.normal.x + dz * mainSample.normal.z;
+  const mainOffset = routeCenterOffset + localOffset;
+  const point = pointAtSampleOffset(routeSample, localOffset, 0.02);
+
+  return {
+    route,
+    distance,
+    offset: localOffset,
+    routeOffset: localOffset,
+    mainOffset,
+    x: point.x,
+    y: point.y,
+    z: point.z,
+    yaw: routeSample.yaw,
+    width: routeSample.width ?? TRACK_WIDTH,
+  };
+}
+
+function hasFeatureClearance(
+  placement: FeaturePlacement,
+  radius: number,
+  reserved: FeatureReservation[],
+): boolean {
+  for (const item of reserved) {
+    const sameRoute = item.routeId === placement.route.id;
+    const distanceGap = Math.abs(item.distance - placement.distance);
+    const horizontalGap = Math.hypot(
+      item.x - placement.x,
+      item.z - placement.z,
+    );
+    const verticalGap = Math.abs(item.y - placement.y);
+    const required = item.radius + radius;
+
+    if (sameRoute && distanceGap <= required * 1.25) {
+      return false;
+    }
+
+    if (verticalGap < 4.5 && horizontalGap <= Math.max(3.2, required * 0.95)) {
+      return false;
+    }
+
+    if (
+      distanceGap <= required * 1.6 &&
+      verticalGap < 5.4 &&
+      horizontalGap <= Math.max(4.2, required * 1.15)
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function isRouteFeatureSafe(samples: TrackSample[], distance: number): boolean {
+  const sample = sampleAtDistance(samples, distance);
+  const before = sampleAtDistance(
+    samples,
+    Math.max(samples[0].distance, distance - 3.2),
+  );
+  const after = sampleAtDistance(
+    samples,
+    Math.min(samples[samples.length - 1].distance, distance + 3.2),
+  );
+  const yawDelta = Math.abs(wrapAngle(after.yaw - before.yaw));
+  const pitchDelta = Math.abs(after.tangent.y - before.tangent.y);
+
+  return (
+    yawDelta < 0.58 &&
+    pitchDelta < 0.36 &&
+    Math.abs(sample.tangent.y) < 0.38 &&
+    (sample.width ?? TRACK_WIDTH) >= MIN_FEATURE_ROUTE_WIDTH &&
+    sample.distance > samples[0].distance + 3 &&
+    sample.distance < samples[samples.length - 1].distance - 3
+  );
+}
+
+function maxFeatureOffset(sample: TrackSample, radius: number): number {
+  return Math.max(
+    0,
+    (sample.width ?? TRACK_WIDTH) / 2 - Math.max(0.62, radius * 0.5),
+  );
+}
+
+function centerOffset(): number {
+  return 0;
+}
+
+function laneSideOffset(
+  rng: () => number,
+  min: number,
+  max: number,
+): (sample: TrackSample) => number {
+  return (sample) => {
+    const sign = rng() < 0.5 ? -1 : 1;
+    const limit = maxFeatureOffset(sample, 1.2);
+    return sign * clamp(min + rng() * (max - min), 0, limit);
+  };
+}
+
+function alternatingLaneOffset(
+  min: number,
+  max: number,
+): (sample: TrackSample, index: number) => number {
+  return (sample, index) => {
+    const sign = index % 2 === 0 ? -1 : 1;
+    const limit = maxFeatureOffset(sample, 1.0);
+    return (
+      sign * clamp(min + ((index * 0.61803398875) % 1) * (max - min), 0, limit)
+    );
+  };
+}
+
+function randomPowerupOffset(
+  rng: () => number,
+): (sample: TrackSample) => number {
+  return (sample) => {
+    const limit = Math.max(0.35, (sample.width ?? TRACK_WIDTH) / 2 - 0.9);
+    return (rng() < 0.5 ? -1 : 1) * rng() * limit;
+  };
+}
+
+function sortFeaturesByDistance(features: TrackFeatures): void {
+  features.gates.sort((a, b) => a.distance - b.distance);
+  features.trappers.sort((a, b) => a.distance - b.distance);
+  features.spinners.sort((a, b) => a.distance - b.distance);
+  features.hammers.sort((a, b) => a.distance - b.distance);
+  features.turnstiles.sort((a, b) => a.distance - b.distance);
+  features.greenBumpers.sort((a, b) => a.distance - b.distance);
+  features.pegs.sort((a, b) => a.distance - b.distance);
+  features.powerups.sort((a, b) => a.distance - b.distance);
 }
 
 type ObstacleMix = {
@@ -1383,7 +2662,6 @@ type ObstacleMix = {
   spinners: boolean;
   hammers: boolean;
   turnstiles: boolean;
-  missingWallSegments: boolean;
 };
 
 function chooseObstacleMix(rng: () => number): ObstacleMix {
@@ -1392,7 +2670,6 @@ function chooseObstacleMix(rng: () => number): ObstacleMix {
     "spinners",
     "hammers",
     "turnstiles",
-    "missingWallSegments",
   ];
   const shuffled = shuffleStrings(entries, rng);
   const targetCount = 1 + Math.floor(rng() * entries.length);
@@ -1403,7 +2680,6 @@ function chooseObstacleMix(rng: () => number): ObstacleMix {
     spinners: selected.has("spinners"),
     hammers: selected.has("hammers"),
     turnstiles: selected.has("turnstiles"),
-    missingWallSegments: selected.has("missingWallSegments"),
   };
 }
 
@@ -1418,15 +2694,26 @@ function shuffleStrings<T>(items: T[], rng: () => number): T[] {
   return result;
 }
 
-function createPegDistances(rng: () => number, finishDistance: number): number[] {
+function createPegDistances(
+  rng: () => number,
+  finishDistance: number,
+): number[] {
   const distances: number[] = [];
 
-  for (let distance = 12; distance < finishDistance - 8; distance += 2.3 + rng() * 4.8) {
+  for (
+    let distance = 12;
+    distance < finishDistance - 8;
+    distance += 2.3 + rng() * 4.8
+  ) {
     distances.push(distance + (rng() - 0.5) * 1.9);
   }
 
   const endStart = finishDistance * 0.9;
-  for (let distance = endStart; distance < finishDistance - 4; distance += 1.8 + rng() * 2.6) {
+  for (
+    let distance = endStart;
+    distance < finishDistance - 4;
+    distance += 1.8 + rng() * 2.6
+  ) {
     distances.push(distance + (rng() - 0.5) * 1.4);
   }
 
@@ -1439,10 +2726,27 @@ function createPowerups(
   reserved: Array<{ distance: number; radius: number }>,
   samples: TrackSample[],
 ): TrackFeatures["powerups"] {
-  const kinds: PowerupKind[] = ["speed", "giant", "tiny", "ghost", "slow", "barrier", "smash"];
+  const kinds: PowerupKind[] = [
+    "speed",
+    "giant",
+    "tiny",
+    "ghost",
+    "slow",
+    "barrier",
+    "smash",
+  ];
   const count = 5 + Math.floor(rng() * 7);
 
-  return pickFeatureDistances(rng, finishDistance, count, 2.0, reserved, samples, false, 0).map((distance, index) => {
+  return pickFeatureDistances(
+    rng,
+    finishDistance,
+    count,
+    2.0,
+    reserved,
+    samples,
+    false,
+    0,
+  ).map((distance, index) => {
     const sample = sampleAtDistance(samples, distance);
     const maxOffset = Math.max(0.35, (sample.width ?? TRACK_WIDTH) / 2 - 0.9);
 
@@ -1462,7 +2766,10 @@ function pickPegDistances(
   reserved: Array<{ distance: number; radius: number }>,
   samples: TrackSample[],
 ): number[] {
-  const candidates = shuffleStrings(createPegDistances(rng, finishDistance), rng);
+  const candidates = shuffleStrings(
+    createPegDistances(rng, finishDistance),
+    rng,
+  );
   const distances: number[] = [];
 
   for (const distance of candidates) {
@@ -1472,7 +2779,9 @@ function pickPegDistances(
 
     const ok =
       isFeatureSafe(samples, distance) &&
-      reserved.every((item) => Math.abs(item.distance - distance) > item.radius + 0.68);
+      reserved.every(
+        (item) => Math.abs(item.distance - distance) > item.radius + 0.68,
+      );
 
     if (!ok) {
       continue;
@@ -1485,20 +2794,45 @@ function pickPegDistances(
   return distances.sort((a, b) => a - b);
 }
 
-function applyFeatureModifiers(samples: TrackSample[], features: TrackFeatures): TrackSample[] {
+function applyFeatureModifiers(
+  samples: TrackSample[],
+  features: TrackFeatures,
+): TrackSample[] {
   return samples.map((sample, index) => {
     const narrowPulse =
-      gaussianPulse(sample.distance / samples[samples.length - 1].distance, 0.24, 0.045) * 0.5 +
-      gaussianPulse(sample.distance / samples[samples.length - 1].distance, 0.54, 0.055) * 0.62 +
-      gaussianPulse(sample.distance / samples[samples.length - 1].distance, 0.86, 0.04) * 0.42;
+      gaussianPulse(
+        sample.distance / samples[samples.length - 1].distance,
+        0.24,
+        0.045,
+      ) *
+        0.5 +
+      gaussianPulse(
+        sample.distance / samples[samples.length - 1].distance,
+        0.54,
+        0.055,
+      ) *
+        0.62 +
+      gaussianPulse(
+        sample.distance / samples[samples.length - 1].distance,
+        0.86,
+        0.04,
+      ) *
+        0.42;
     const wideExtra = features.wideZones.reduce(
-      (total, zone) => total + zone.extraWidth * smoothRange(sample.distance, zone.startDistance, zone.endDistance),
+      (total, zone) =>
+        total +
+        zone.extraWidth *
+          smoothRange(sample.distance, zone.startDistance, zone.endDistance),
       0,
     );
     const widthWave =
       Math.sin(sample.distance * 0.035) * 0.24 +
       Math.sin(sample.distance * 0.011 + 1.7) * 0.34;
-    const width = clamp(TRACK_WIDTH + wideExtra + widthWave - narrowPulse, TRACK_WIDTH * 0.6, TRACK_WIDTH + 4.8);
+    const width = clamp(
+      TRACK_WIDTH + wideExtra + widthWave - narrowPulse,
+      MIN_MAIN_TRACK_WIDTH,
+      TRACK_WIDTH + 4.8,
+    );
 
     return {
       ...sample,
@@ -1520,9 +2854,16 @@ function computeBank(samples: TrackSample[], index: number): number {
 function isFeatureSafe(samples: TrackSample[], distance: number): boolean {
   const sample = sampleAtDistance(samples, distance);
   const before = sampleAtDistance(samples, Math.max(0, distance - 2));
-  const after = sampleAtDistance(samples, Math.min(samples[samples.length - 1].distance, distance + 2));
+  const after = sampleAtDistance(
+    samples,
+    Math.min(samples[samples.length - 1].distance, distance + 2),
+  );
 
-  return Math.abs(wrapAngle(after.yaw - before.yaw)) < 0.5 && sample.distance > 9 && sample.distance < samples[samples.length - 1].distance - 18;
+  return (
+    Math.abs(wrapAngle(after.yaw - before.yaw)) < 0.5 &&
+    sample.distance > 9 &&
+    sample.distance < samples[samples.length - 1].distance - 18
+  );
 }
 
 function pickFeatureDistances(
@@ -1537,11 +2878,17 @@ function pickFeatureDistances(
 ): number[] {
   const distances: number[] = [];
 
-  for (let attempt = 0; attempt < count * 42 && distances.length < count; attempt += 1) {
+  for (
+    let attempt = 0;
+    attempt < count * 42 && distances.length < count;
+    attempt += 1
+  ) {
     const distance = randomFeatureDistance(rng, finishDistance, endZoneBias);
     const ok =
       isFeatureSafe(samples, distance) &&
-      reserved.every((item) => Math.abs(item.distance - distance) > item.radius + radius);
+      reserved.every(
+        (item) => Math.abs(item.distance - distance) > item.radius + radius,
+      );
 
     if (!ok) {
       continue;
@@ -1552,13 +2899,21 @@ function pickFeatureDistances(
   }
 
   if (required && distances.length < count) {
-    for (let attempt = 0; attempt < count * 70 && distances.length < count; attempt += 1) {
+    for (
+      let attempt = 0;
+      attempt < count * 70 && distances.length < count;
+      attempt += 1
+    ) {
       const distance = randomFeatureDistance(rng, finishDistance, endZoneBias);
       const relaxedRadius = radius * 0.55;
       const ok =
         isFeatureSafe(samples, distance) &&
         distances.every((item) => Math.abs(item - distance) > radius * 2.4) &&
-        reserved.every((item) => Math.abs(item.distance - distance) > Math.max(item.radius, relaxedRadius));
+        reserved.every(
+          (item) =>
+            Math.abs(item.distance - distance) >
+            Math.max(item.radius, relaxedRadius),
+        );
 
       if (!ok) {
         continue;
@@ -1572,7 +2927,11 @@ function pickFeatureDistances(
   return distances.sort((a, b) => a - b);
 }
 
-function randomFeatureDistance(rng: () => number, finishDistance: number, endZoneBias: number): number {
+function randomFeatureDistance(
+  rng: () => number,
+  finishDistance: number,
+  endZoneBias: number,
+): number {
   if (rng() < endZoneBias) {
     return finishDistance * (0.9 + rng() * 0.08);
   }
@@ -1584,11 +2943,19 @@ function randomFeatureDistance(rng: () => number, finishDistance: number, endZon
   return 24 + rng() * (finishDistance - 54);
 }
 
-function hasBadTrackGeometry(samples: TrackSample[], totalLength: number): boolean {
-  return hasBadSelfIntersection(samples, totalLength) || hasBadLocalGeometry(samples);
+function hasBadTrackGeometry(
+  samples: TrackSample[],
+  totalLength: number,
+): boolean {
+  return (
+    hasBadSelfIntersection(samples, totalLength) || hasBadLocalGeometry(samples)
+  );
 }
 
-function hasBadSelfIntersection(samples: TrackSample[], totalLength: number): boolean {
+function hasBadSelfIntersection(
+  samples: TrackSample[],
+  totalLength: number,
+): boolean {
   const stride = 4;
   const minDistanceGap = Math.max(18, totalLength * 0.038);
 
@@ -1600,17 +2967,24 @@ function hasBadSelfIntersection(samples: TrackSample[], totalLength: number): bo
     for (let b = a + stride * 4; b < samples.length - stride; b += stride) {
       const b1 = samples[b];
       const b2 = samples[b + stride];
-      const bWidth = ((b1.width ?? TRACK_WIDTH) + (b2.width ?? TRACK_WIDTH)) / 2;
+      const bWidth =
+        ((b1.width ?? TRACK_WIDTH) + (b2.width ?? TRACK_WIDTH)) / 2;
 
       if (Math.abs(a1.distance - b1.distance) < minDistanceGap) {
         continue;
       }
 
       const flatDistance = segmentDistance2d(a1, a2, b1, b2);
-      const verticalClearance = Math.abs(((a1.y + a2.y) / 2) - ((b1.y + b2.y) / 2));
-      const requiredClearance = Math.max(MIN_CENTERLINE_CLEARANCE, (aWidth + bWidth) / 2 + 3.8);
+      const verticalClearance = Math.abs((a1.y + a2.y) / 2 - (b1.y + b2.y) / 2);
+      const requiredClearance = Math.max(
+        MIN_CENTERLINE_CLEARANCE,
+        (aWidth + bWidth) / 2 + 3.8,
+      );
 
-      if (flatDistance < requiredClearance && verticalClearance < MIN_VERTICAL_CROSSING_CLEARANCE) {
+      if (
+        flatDistance < requiredClearance &&
+        verticalClearance < MIN_VERTICAL_CROSSING_CLEARANCE
+      ) {
         return true;
       }
     }
@@ -1631,7 +3005,9 @@ function hasBadLocalGeometry(samples: TrackSample[]): boolean {
     const previousPitch = pitchBetween(previous, current);
     const nextPitch = pitchBetween(current, next);
     const localPitchDelta = Math.abs(nextPitch - previousPitch);
-    const tooSteep = Math.abs(previousPitch) > MAX_SAMPLE_PITCH || Math.abs(nextPitch) > MAX_SAMPLE_PITCH;
+    const tooSteep =
+      Math.abs(previousPitch) > MAX_SAMPLE_PITCH ||
+      Math.abs(nextPitch) > MAX_SAMPLE_PITCH;
 
     if (
       localYawDelta > MAX_LOCAL_YAW_DELTA ||
@@ -1650,7 +3026,12 @@ function pitchBetween(a: TrackPoint, b: TrackPoint): number {
   return Math.atan2(a.y - b.y, Math.hypot(b.x - a.x, b.z - a.z));
 }
 
-function segmentDistance2d(a1: TrackPoint, a2: TrackPoint, b1: TrackPoint, b2: TrackPoint): number {
+function segmentDistance2d(
+  a1: TrackPoint,
+  a2: TrackPoint,
+  b1: TrackPoint,
+  b2: TrackPoint,
+): number {
   if (segmentsIntersect(a1, a2, b1, b2)) {
     return 0;
   }
@@ -1663,18 +3044,31 @@ function segmentDistance2d(a1: TrackPoint, a2: TrackPoint, b1: TrackPoint, b2: T
   );
 }
 
-function pointSegmentDistance2d(point: TrackPoint, a: TrackPoint, b: TrackPoint): number {
+function pointSegmentDistance2d(
+  point: TrackPoint,
+  a: TrackPoint,
+  b: TrackPoint,
+): number {
   const dx = b.x - a.x;
   const dz = b.z - a.z;
   const lengthSq = dx * dx + dz * dz || 1;
-  const t = clamp(((point.x - a.x) * dx + (point.z - a.z) * dz) / lengthSq, 0, 1);
+  const t = clamp(
+    ((point.x - a.x) * dx + (point.z - a.z) * dz) / lengthSq,
+    0,
+    1,
+  );
   const x = a.x + dx * t;
   const z = a.z + dz * t;
 
   return Math.hypot(point.x - x, point.z - z);
 }
 
-function segmentsIntersect(a1: TrackPoint, a2: TrackPoint, b1: TrackPoint, b2: TrackPoint): boolean {
+function segmentsIntersect(
+  a1: TrackPoint,
+  a2: TrackPoint,
+  b1: TrackPoint,
+  b2: TrackPoint,
+): boolean {
   const d1 = direction(a1, a2, b1);
   const d2 = direction(a1, a2, b2);
   const d3 = direction(b1, b2, a1);
@@ -1687,23 +3081,41 @@ function direction(a: TrackPoint, b: TrackPoint, c: TrackPoint): number {
   return (c.x - a.x) * (b.z - a.z) - (c.z - a.z) * (b.x - a.x);
 }
 
-export function sampleAtDistance(samples: TrackSample[], distance: number): TrackSample {
-  let closest = samples[0];
-  let closestDelta = Math.abs(closest.distance - distance);
+export function sampleAtDistance(
+  samples: TrackSample[],
+  distance: number,
+): TrackSample {
+  if (distance <= samples[0].distance) {
+    return samples[0];
+  }
 
-  for (const sample of samples) {
-    const delta = Math.abs(sample.distance - distance);
+  const last = samples[samples.length - 1];
+  if (distance >= last.distance) {
+    return last;
+  }
 
-    if (delta < closestDelta) {
-      closest = sample;
-      closestDelta = delta;
+  let low = 0;
+  let high = samples.length - 1;
+
+  while (high - low > 1) {
+    const middle = (low + high) >> 1;
+
+    if (samples[middle].distance < distance) {
+      low = middle;
+    } else {
+      high = middle;
     }
   }
 
-  return closest;
+  return distance - samples[low].distance <= samples[high].distance - distance
+    ? samples[low]
+    : samples[high];
 }
 
-export function progressForPosition(track: TrackDefinition, position: { x: number; y?: number; z: number }): number {
+export function progressForPosition(
+  track: TrackDefinition,
+  position: { x: number; y?: number; z: number },
+): number {
   let closest = track.samples[0];
   let closestScore = Number.POSITIVE_INFINITY;
 
@@ -1725,7 +3137,12 @@ export function progressForPosition(track: TrackDefinition, position: { x: numbe
 export function trackDistanceForPosition(
   track: TrackDefinition,
   position: { x: number; y: number; z: number },
-): { distance: number; lateralDistance: number; verticalDistance: number; onCourse: boolean } {
+): {
+  distance: number;
+  lateralDistance: number;
+  verticalDistance: number;
+  onCourse: boolean;
+} {
   let closest = track.samples[0];
   let closestScore = Number.POSITIVE_INFINITY;
 
@@ -1743,7 +3160,10 @@ export function trackDistanceForPosition(
     }
   }
 
-  const lateralDistance = Math.hypot(closest.x - position.x, closest.z - position.z);
+  const lateralDistance = Math.hypot(
+    closest.x - position.x,
+    closest.z - position.z,
+  );
   const verticalDistance = Math.abs(closest.y - position.y);
   const width = closest.width ?? TRACK_WIDTH;
 
@@ -1759,10 +3179,43 @@ export function trackDistanceForPosition(
 }
 
 function raceRouteSamples(track: TrackDefinition): TrackSample[] {
-  return track.branches.length === 0 ? track.samples : [track.samples, ...track.branches.map((branch) => branch.samples)].flat();
+  const cached = routeSamplesByTrack.get(track);
+
+  if (cached) {
+    return cached;
+  }
+
+  const routeSamples: TrackSample[][] = [track.samples];
+
+  if (track.splitSurfaces.length > 0) {
+    for (const surface of track.splitSurfaces) {
+      const leftLane = splitSurfaceLaneSamples(surface, -1);
+      const rightLane = splitSurfaceLaneSamples(surface, 1);
+
+      if (leftLane.length >= 2) {
+        routeSamples.push(leftLane);
+      }
+
+      if (rightLane.length >= 2) {
+        routeSamples.push(rightLane);
+      }
+    }
+  } else {
+    routeSamples.push(...track.branches.map((branch) => branch.samples));
+  }
+
+  const samples = routeSamples.flat();
+  routeSamplesByTrack.set(track, samples);
+
+  return samples;
 }
 
-export function sampleTrack(points: TrackPoint[], count: number, totalLength = TRACK_LENGTH, startHeight = START_HEIGHT): TrackSample[] {
+export function sampleTrack(
+  points: TrackPoint[],
+  count: number,
+  totalLength = TRACK_LENGTH,
+  startHeight = START_HEIGHT,
+): TrackSample[] {
   const positions: TrackPoint[] = [];
 
   for (let index = 0; index <= count; index += 1) {
@@ -1785,7 +3238,10 @@ export function sampleTrack(points: TrackPoint[], count: number, totalLength = T
       z: after.z - before.z,
     });
     const flatLength = Math.hypot(tangent.x, tangent.z) || 1;
-    const flatTangent = { x: tangent.x / flatLength, z: tangent.z / flatLength };
+    const flatTangent = {
+      x: tangent.x / flatLength,
+      z: tangent.z / flatLength,
+    };
     const normal = { x: flatTangent.z, z: -flatTangent.x };
 
     samples.push({
@@ -1802,7 +3258,11 @@ export function sampleTrack(points: TrackPoint[], count: number, totalLength = T
   return samples;
 }
 
-function enforceDownhillProfile(points: TrackPoint[], totalLength: number, startHeight: number): void {
+function enforceDownhillProfile(
+  points: TrackPoint[],
+  totalLength: number,
+  startHeight: number,
+): void {
   if (points.length === 0) {
     return;
   }
@@ -1812,7 +3272,10 @@ function enforceDownhillProfile(points: TrackPoint[], totalLength: number, start
   for (let index = 1; index < points.length; index += 1) {
     const previous = points[index - 1];
     const current = points[index];
-    const flatDistance = Math.hypot(current.x - previous.x, current.z - previous.z);
+    const flatDistance = Math.hypot(
+      current.x - previous.x,
+      current.z - previous.z,
+    );
     const courseT = current.distance / totalLength;
     const startBoost = courseT < 0.14 ? 0.075 * (1 - courseT / 0.14) : 0;
     const steepSection =
@@ -1844,31 +3307,52 @@ export function createRibbon(
 
       positions.push(
         sample.x + sample.normal.x * side * (sampleWidth / 2),
-        sample.y + yOffset + Math.sin(sample.bank ?? 0) * side * (sampleWidth / 2),
+        sample.y +
+          yOffset +
+          Math.sin(sample.bank ?? 0) * side * (sampleWidth / 2),
         sample.z + sample.normal.z * side * (sampleWidth / 2),
       );
     }
 
     if (index < samples.length - 1) {
-      const segmentDistance = (sample.distance + samples[index + 1].distance) / 2;
+      const segmentDistance =
+        (sample.distance + samples[index + 1].distance) / 2;
 
       if (isDistanceInGap(segmentDistance, gaps)) {
         continue;
       }
 
       const start = index * 2;
-      indices.push(start, start + 2, start + 1, start + 1, start + 2, start + 3);
+      indices.push(
+        start,
+        start + 2,
+        start + 1,
+        start + 1,
+        start + 2,
+        start + 3,
+      );
     }
   }
 
-  return { vertices: new Float32Array(positions), indices: new Uint32Array(indices) };
+  return {
+    vertices: new Float32Array(positions),
+    indices: new Uint32Array(indices),
+  };
 }
 
-function isDistanceInGap(distance: number, gaps: Array<{ startDistance: number; endDistance: number }>): boolean {
-  return gaps.some((gap) => distance > gap.startDistance && distance < gap.endDistance);
+function isDistanceInGap(
+  distance: number,
+  gaps: Array<{ startDistance: number; endDistance: number }>,
+): boolean {
+  return gaps.some(
+    (gap) => distance > gap.startDistance && distance < gap.endDistance,
+  );
 }
 
-export function createWall(samples: TrackSample[], side: -1 | 1): TrackMeshData {
+export function createWall(
+  samples: TrackSample[],
+  side: -1 | 1,
+): TrackMeshData {
   const positions: number[] = [];
   const indices: number[] = [];
 
@@ -1879,23 +3363,51 @@ export function createWall(samples: TrackSample[], side: -1 | 1): TrackMeshData 
     const z = sample.z + sample.normal.z * side * offset;
     const bankY = Math.sin(sample.bank ?? 0) * side * offset;
 
-    positions.push(x, sample.y + bankY - 0.16, z, x, sample.y + bankY + 1.02, z);
+    positions.push(
+      x,
+      sample.y + bankY - 0.16,
+      z,
+      x,
+      sample.y + bankY + 1.02,
+      z,
+    );
 
     if (index < samples.length - 1) {
       const start = index * 2;
 
       if (side < 0) {
-        indices.push(start, start + 1, start + 2, start + 1, start + 3, start + 2);
+        indices.push(
+          start,
+          start + 1,
+          start + 2,
+          start + 1,
+          start + 3,
+          start + 2,
+        );
       } else {
-        indices.push(start, start + 2, start + 1, start + 1, start + 2, start + 3);
+        indices.push(
+          start,
+          start + 2,
+          start + 1,
+          start + 1,
+          start + 2,
+          start + 3,
+        );
       }
     }
   }
 
-  return { vertices: new Float32Array(positions), indices: new Uint32Array(indices) };
+  return {
+    vertices: new Float32Array(positions),
+    indices: new Uint32Array(indices),
+  };
 }
 
-function createCatchCenter(samples: TrackSample[]): { x: number; y: number; z: number } {
+function createCatchCenter(samples: TrackSample[]): {
+  x: number;
+  y: number;
+  z: number;
+} {
   const end = samples[samples.length - 1];
 
   return {
@@ -1905,7 +3417,11 @@ function createCatchCenter(samples: TrackSample[]): { x: number; y: number; z: n
   };
 }
 
-function catmullPoint(points: TrackPoint[], distance: number, totalLength: number): TrackPoint {
+function catmullPoint(
+  points: TrackPoint[],
+  distance: number,
+  totalLength: number,
+): TrackPoint {
   const step = totalLength / (points.length - 1);
   const raw = clamp(distance / step, 0, points.length - 1);
   const index = Math.floor(raw);
@@ -1923,7 +3439,13 @@ function catmullPoint(points: TrackPoint[], distance: number, totalLength: numbe
   };
 }
 
-function catmull(p0: number, p1: number, p2: number, p3: number, t: number): number {
+function catmull(
+  p0: number,
+  p1: number,
+  p2: number,
+  p3: number,
+  t: number,
+): number {
   const t2 = t * t;
   const t3 = t2 * t;
   const tension = 0.38;
@@ -1938,7 +3460,11 @@ function catmull(p0: number, p1: number, p2: number, p3: number, t: number): num
   );
 }
 
-function normalize3(value: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+function normalize3(value: { x: number; y: number; z: number }): {
+  x: number;
+  y: number;
+  z: number;
+} {
   const length = Math.hypot(value.x, value.y, value.z) || 1;
 
   return { x: value.x / length, y: value.y / length, z: value.z / length };
@@ -1965,7 +3491,10 @@ function clamp(value: number, min: number, max: number): number {
 function smoothRange(distance: number, start: number, end: number): number {
   const fade = Math.min(5.5, Math.max(1, (end - start) / 3));
 
-  return smoothstep(start, start + fade, distance) * (1 - smoothstep(end - fade, end, distance));
+  return (
+    smoothstep(start, start + fade, distance) *
+    (1 - smoothstep(end - fade, end, distance))
+  );
 }
 
 function smoothstep(edge0: number, edge1: number, value: number): number {
@@ -1983,3 +3512,5 @@ function smootherstep(edge0: number, edge1: number, value: number): number {
 function wrapAngle(angle: number): number {
   return Math.atan2(Math.sin(angle), Math.cos(angle));
 }
+
+

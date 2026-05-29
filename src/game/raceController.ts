@@ -75,6 +75,7 @@ export class RaceController {
     this.savedSetups = readSavedSetups();
     this.loadStoredSession();
     this.raceAudio.volume = this.musicVolume;
+    window.addEventListener("beforeunload", () => this.saveStoredSession());
   }
 
   init(): void {

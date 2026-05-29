@@ -11,6 +11,7 @@ import {
   MeshStandardMaterial,
   Object3D,
   OctahedronGeometry,
+  Uint32BufferAttribute,
   Vector3,
 } from "three";
 import { createStartLayout } from "../shared/marbleLayout";
@@ -75,6 +76,19 @@ type DynamicHammerRenderData = {
   side: number;
 };
 
+type RouteAwareFeature = {
+  distance: number;
+  offset?: number;
+  routeId?: string;
+  routeOffset?: number;
+  mainOffset?: number;
+  x?: number;
+  y?: number;
+  z?: number;
+  yaw?: number;
+  width?: number;
+};
+
 export function createTrackMeshes(track: TrackDefinition): Group {
   const group = new Group();
   const roadMaterial = new MeshStandardMaterial({
@@ -91,11 +105,19 @@ export function createTrackMeshes(track: TrackDefinition): Group {
 
   // Only cut the main road where a replacement split surface was actually generated.
   // Cutting by feature intent creates missing road if the split surface is rejected.
-  const splitRoadGaps = track.splitSurfaces.map(({ startDistance, endDistance }) => ({
-    startDistance,
-    endDistance,
-  }));
-  const road = new Mesh(toGeometry(createThickRibbon(track.samples, ROAD_THICKNESS, splitRoadGaps), true), roadMaterial);
+  const splitRoadGaps = track.splitSurfaces.map(
+    ({ startDistance, endDistance }) => ({
+      startDistance,
+      endDistance,
+    }),
+  );
+  const road = new Mesh(
+    toGeometry(
+      createThickRibbon(track.samples, ROAD_THICKNESS, splitRoadGaps),
+      true,
+    ),
+    roadMaterial,
+  );
   road.receiveShadow = true;
   group.add(road);
 
@@ -106,7 +128,10 @@ export function createTrackMeshes(track: TrackDefinition): Group {
   }
 
   for (const side of [-1, 1] as const) {
-    const wall = new Mesh(toGeometry(createThickWall(track.samples, side, 1, track)), sideMaterial);
+    const wall = new Mesh(
+      toGeometry(createThickWall(track.samples, side, 1, track)),
+      sideMaterial,
+    );
     wall.castShadow = true;
     wall.receiveShadow = true;
     group.add(wall);
@@ -118,7 +143,13 @@ export function createTrackMeshes(track: TrackDefinition): Group {
     }
 
     const wall = new Mesh(
-      toGeometry(createWallAlongBoundary(boundary.points, boundary.closed, boundary.outwardSign)),
+      toGeometry(
+        createWallAlongBoundary(
+          boundary.points,
+          boundary.closed,
+          boundary.outwardSign,
+        ),
+      ),
       sideMaterial,
     );
     wall.castShadow = true;
@@ -135,37 +166,56 @@ export function createTrackMeshes(track: TrackDefinition): Group {
 
 export function updateDynamicTrackMeshes(group: Group, time: number): void {
   group.traverse((object) => {
-    const peg = object.userData.dynamicPeg as DynamicVerticalObstacleRenderData | undefined;
+    const peg = object.userData.dynamicPeg as
+      | DynamicVerticalObstacleRenderData
+      | undefined;
     if (peg) {
       const extension = pegExtensionAtTime(time, peg.phase);
       object.scale.y = Math.max(0.04, extension);
-      object.position.y = verticalObstacleCenterY(peg.trackY, peg.fullHeight, object.scale.y);
+      object.position.y = verticalObstacleCenterY(
+        peg.trackY,
+        peg.fullHeight,
+        object.scale.y,
+      );
       object.rotation.x = 0;
       object.rotation.z = 0;
       return;
     }
 
-    const greenBumper = object.userData.dynamicGreenBumper as DynamicVerticalObstacleRenderData | undefined;
+    const greenBumper = object.userData.dynamicGreenBumper as
+      | DynamicVerticalObstacleRenderData
+      | undefined;
     if (greenBumper) {
       const extension = pegExtensionAtTime(time, greenBumper.phase);
       object.scale.y = Math.max(0.04, extension);
-      object.position.y = verticalObstacleCenterY(greenBumper.trackY, greenBumper.fullHeight, object.scale.y);
+      object.position.y = verticalObstacleCenterY(
+        greenBumper.trackY,
+        greenBumper.fullHeight,
+        object.scale.y,
+      );
       object.rotation.x = 0;
       object.rotation.z = 0;
       return;
     }
 
-    const gate = object.userData.dynamicGate as DynamicGateRenderData | undefined;
+    const gate = object.userData.dynamicGate as
+      | DynamicGateRenderData
+      | undefined;
     if (gate) {
-      const extension = gate.trapper ? trapperExtensionAtTime(time, gate.phase) : gateExtensionAtTime(time, gate.phase);
+      const extension = gate.trapper
+        ? trapperExtensionAtTime(time, gate.phase)
+        : gateExtensionAtTime(time, gate.phase);
       object.scale.y = Math.max(0.035, extension);
-      object.position.y = gate.closedY - (1 - extension) * (gate.trapper ? 1.24 : 0.92);
+      object.position.y =
+        gate.closedY - (1 - extension) * (gate.trapper ? 1.24 : 0.92);
       object.rotation.x = 0;
       object.rotation.z = 0;
       return;
     }
 
-    const spinner = object.userData.dynamicSpinner as DynamicSpinnerRenderData | undefined;
+    const spinner = object.userData.dynamicSpinner as
+      | DynamicSpinnerRenderData
+      | undefined;
     if (spinner) {
       object.rotation.y = spinner.yaw + spinner.phase + time * spinner.speed;
       object.rotation.x = 0;
@@ -173,9 +223,12 @@ export function updateDynamicTrackMeshes(group: Group, time: number): void {
       return;
     }
 
-    const hammer = object.userData.dynamicHammer as DynamicHammerRenderData | undefined;
+    const hammer = object.userData.dynamicHammer as
+      | DynamicHammerRenderData
+      | undefined;
     if (hammer) {
-      object.rotation.y = hammer.yaw + Math.sin(time * 0.75 + hammer.phase) * 1.15 * hammer.side;
+      object.rotation.y =
+        hammer.yaw + Math.sin(time * 0.75 + hammer.phase) * 1.15 * hammer.side;
       object.rotation.x = 0;
       object.rotation.z = 0;
       return;
@@ -189,7 +242,10 @@ export function updateDynamicTrackMeshes(group: Group, time: number): void {
   });
 }
 
-export function setCollectedPowerupsVisible(group: Group, collectedIds: string[]): void {
+export function setCollectedPowerupsVisible(
+  group: Group,
+  collectedIds: string[],
+): void {
   const collected = new Set(collectedIds);
 
   group.traverse((object) => {
@@ -200,7 +256,10 @@ export function setCollectedPowerupsVisible(group: Group, collectedIds: string[]
   });
 }
 
-export function setDestroyedObstaclesVisible(group: Group, destroyedIds: string[]): void {
+export function setDestroyedObstaclesVisible(
+  group: Group,
+  destroyedIds: string[],
+): void {
   const destroyed = new Set(destroyedIds);
 
   group.traverse((object) => {
@@ -211,7 +270,10 @@ export function setDestroyedObstaclesVisible(group: Group, destroyedIds: string[
   });
 }
 
-export function startCameraFrame(track: TrackDefinition): { position: Vector3; target: Vector3 } {
+export function startCameraFrame(track: TrackDefinition): {
+  position: Vector3;
+  target: Vector3;
+} {
   const start = track.start;
   const bounds = track.samples.reduce(
     (current, sample) => ({
@@ -232,7 +294,11 @@ export function startCameraFrame(track: TrackDefinition): { position: Vector3; t
     },
   );
 
-  const horizontalSpan = Math.max(bounds.maxX - bounds.minX, bounds.maxZ - bounds.minZ, TRACK_WIDTH * 6);
+  const horizontalSpan = Math.max(
+    bounds.maxX - bounds.minX,
+    bounds.maxZ - bounds.minZ,
+    TRACK_WIDTH * 6,
+  );
   const height = clamp(horizontalSpan * 0.34, 22, 92);
   const pullBack = clamp(horizontalSpan * 0.22, 16, 68);
   const sideOffset = clamp(horizontalSpan * 0.08, 4, 18);
@@ -248,7 +314,11 @@ export function startCameraFrame(track: TrackDefinition): { position: Vector3; t
   return { position, target };
 }
 
-export function startingMarblePosition(index: number, total: number, track = generateTrack(PREVIEW_TRACK_SEED)): Vector3 {
+export function startingMarblePosition(
+  index: number,
+  total: number,
+  track = generateTrack(PREVIEW_TRACK_SEED),
+): Vector3 {
   const layout = createStartLayout(total);
   const laneOffset = layout.laneOffsets[index] ?? 0;
   const forwardOffset = layout.forwardOffsets[index] ?? 0;
@@ -269,7 +339,10 @@ function addFinishLine(group: Group, track: TrackDefinition): void {
 
   for (let index = 0; index < tileCount; index += 1) {
     const offset = -((finishWidth - 0.55) / 2) + tileWidth * (index + 0.5);
-    const tile = new Mesh(new BoxGeometry(tileWidth * 0.95, 0.035, 0.2), index % 2 === 0 ? white : black);
+    const tile = new Mesh(
+      new BoxGeometry(tileWidth * 0.95, 0.035, 0.2),
+      index % 2 === 0 ? white : black,
+    );
 
     setTrackTransform(
       tile,
@@ -282,15 +355,22 @@ function addFinishLine(group: Group, track: TrackDefinition): void {
 
     group.add(tile);
   }
-
 }
 
 function addCatchContainer(group: Group, track: TrackDefinition): void {
   const width = TRACK_WIDTH + 14;
   const length = 22;
   const wallHeight = 2.8;
-  const trayMaterial = new MeshStandardMaterial({ color: 0x171d24, roughness: 0.72, metalness: 0.04 });
-  const wallMaterial = new MeshStandardMaterial({ color: 0x303a44, roughness: 0.62, metalness: 0.05 });
+  const trayMaterial = new MeshStandardMaterial({
+    color: 0x171d24,
+    roughness: 0.72,
+    metalness: 0.04,
+  });
+  const wallMaterial = new MeshStandardMaterial({
+    color: 0x303a44,
+    roughness: 0.62,
+    metalness: 0.05,
+  });
   const center = track.catchCenter;
 
   const floor = new Mesh(new BoxGeometry(width, 0.32, length), trayMaterial);
@@ -299,15 +379,29 @@ function addCatchContainer(group: Group, track: TrackDefinition): void {
   group.add(floor);
 
   for (const side of [-1, 1]) {
-    const sideWall = new Mesh(new BoxGeometry(0.44, wallHeight, length), wallMaterial);
-    sideWall.position.set(center.x + side * width / 2, center.y + wallHeight / 2, center.z);
+    const sideWall = new Mesh(
+      new BoxGeometry(0.44, wallHeight, length),
+      wallMaterial,
+    );
+    sideWall.position.set(
+      center.x + (side * width) / 2,
+      center.y + wallHeight / 2,
+      center.z,
+    );
     sideWall.castShadow = true;
     sideWall.receiveShadow = true;
     group.add(sideWall);
   }
 
-  const backWall = new Mesh(new BoxGeometry(width, wallHeight, 0.44), wallMaterial);
-  backWall.position.set(center.x, center.y + wallHeight / 2, center.z + length / 2);
+  const backWall = new Mesh(
+    new BoxGeometry(width, wallHeight, 0.44),
+    wallMaterial,
+  );
+  backWall.position.set(
+    center.x,
+    center.y + wallHeight / 2,
+    center.z + length / 2,
+  );
   backWall.castShadow = true;
   backWall.receiveShadow = true;
   group.add(backWall);
@@ -320,24 +414,58 @@ function addCatchContainer(group: Group, track: TrackDefinition): void {
 }
 
 function addFeatureMeshes(group: Group, track: TrackDefinition): void {
-  const pegMaterial = new MeshStandardMaterial({ color: 0xd7463f, roughness: 0.5 });
-  const bumperMaterial = new MeshStandardMaterial({ color: 0x36c96d, roughness: 0.38, metalness: 0.05 });
-  const gateMaterial = new MeshStandardMaterial({ color: 0x4a90e2, roughness: 0.5 });
-  const trapperMaterial = new MeshStandardMaterial({ color: 0xff6f3c, roughness: 0.45, metalness: 0.04 });
-  const spinnerMaterial = new MeshStandardMaterial({ color: 0xf2b84b, roughness: 0.42 });
-  const hammerMaterial = new MeshStandardMaterial({ color: 0xa35df2, roughness: 0.45 });
+  const pegMaterial = new MeshStandardMaterial({
+    color: 0xd7463f,
+    roughness: 0.5,
+  });
+  const bumperMaterial = new MeshStandardMaterial({
+    color: 0x36c96d,
+    roughness: 0.38,
+    metalness: 0.05,
+  });
+  const gateMaterial = new MeshStandardMaterial({
+    color: 0x4a90e2,
+    roughness: 0.5,
+  });
+  const trapperMaterial = new MeshStandardMaterial({
+    color: 0xff6f3c,
+    roughness: 0.45,
+    metalness: 0.04,
+  });
+  const spinnerMaterial = new MeshStandardMaterial({
+    color: 0xf2b84b,
+    roughness: 0.42,
+  });
+  const hammerMaterial = new MeshStandardMaterial({
+    color: 0xa35df2,
+    roughness: 0.45,
+  });
   const powerupGeometry = new OctahedronGeometry(0.38, 0);
 
   for (const [index, peg] of track.features.pegs.entries()) {
-    const sample = featureSampleAtDistance(track, peg.distance, index);
+    const sample = featureSampleForFeature(track, peg);
     const maxOffset = Math.max(0.25, (sample.width ?? TRACK_WIDTH) / 2 - 1.05);
-    const offset = clamp(peg.offset, -maxOffset, maxOffset);
+    const offset = clamp(featureRenderOffset(peg), -maxOffset, maxOffset);
     const extension = pegExtensionAtTime(0, peg.phase);
-    const mesh = new Mesh(new CylinderGeometry(peg.radius, peg.radius, PEG_HEIGHT, 18), pegMaterial);
-    const trackY = setUprightObstacleTransform(mesh, sample, offset, PEG_HEIGHT, extension, 0);
+    const mesh = new Mesh(
+      new CylinderGeometry(peg.radius, peg.radius, PEG_HEIGHT, 18),
+      pegMaterial,
+    );
+    const trackY = setUprightObstacleTransform(
+      mesh,
+      sample,
+      offset,
+      PEG_HEIGHT,
+      extension,
+      0,
+    );
 
     mesh.scale.y = Math.max(0.04, extension);
-    mesh.userData.dynamicPeg = { trackY, phase: peg.phase, fullHeight: PEG_HEIGHT } satisfies DynamicVerticalObstacleRenderData;
+    mesh.userData.dynamicPeg = {
+      trackY,
+      phase: peg.phase,
+      fullHeight: PEG_HEIGHT,
+    } satisfies DynamicVerticalObstacleRenderData;
     mesh.userData.obstacleId = `peg-${index}`;
     disableShadows(mesh);
 
@@ -345,15 +473,29 @@ function addFeatureMeshes(group: Group, track: TrackDefinition): void {
   }
 
   for (const [index, bumper] of track.features.greenBumpers.entries()) {
-    const sample = featureSampleAtDistance(track, bumper.distance, index);
+    const sample = featureSampleForFeature(track, bumper);
     const runtimePhase = (bumper as typeof bumper & { phase?: number }).phase;
     const phase = runtimePhase ?? greenBumperPhase(index, bumper.distance);
     const extension = pegExtensionAtTime(0, phase);
-    const mesh = new Mesh(new CylinderGeometry(bumper.radius, bumper.radius, BUMPER_HEIGHT, 24), bumperMaterial);
-    const trackY = setUprightObstacleTransform(mesh, sample, bumper.offset, BUMPER_HEIGHT, extension, 0);
+    const mesh = new Mesh(
+      new CylinderGeometry(bumper.radius, bumper.radius, BUMPER_HEIGHT, 24),
+      bumperMaterial,
+    );
+    const trackY = setUprightObstacleTransform(
+      mesh,
+      sample,
+      featureRenderOffset(bumper),
+      BUMPER_HEIGHT,
+      extension,
+      0,
+    );
 
     mesh.scale.y = Math.max(0.04, extension);
-    mesh.userData.dynamicGreenBumper = { trackY, phase, fullHeight: BUMPER_HEIGHT } satisfies DynamicVerticalObstacleRenderData;
+    mesh.userData.dynamicGreenBumper = {
+      trackY,
+      phase,
+      fullHeight: BUMPER_HEIGHT,
+    } satisfies DynamicVerticalObstacleRenderData;
     mesh.userData.obstacleId = `green-bumper-${index}`;
     disableShadows(mesh);
 
@@ -361,10 +503,20 @@ function addFeatureMeshes(group: Group, track: TrackDefinition): void {
   }
 
   for (const [index, gate] of track.features.gates.entries()) {
-    const sample = featureSampleAtDistance(track, gate.distance, index);
+    const sample = featureSampleForFeature(track, gate);
     const width = sample.width ?? TRACK_WIDTH;
-    const mesh = new Mesh(new BoxGeometry(width + 0.24, GATE_HEIGHT, 0.32), gateMaterial);
-    const trackY = setUprightObstacleTransform(mesh, sample, 0, GATE_HEIGHT, 1, 0);
+    const mesh = new Mesh(
+      new BoxGeometry(width + 0.24, GATE_HEIGHT, 0.32),
+      gateMaterial,
+    );
+    const trackY = setUprightObstacleTransform(
+      mesh,
+      sample,
+      featureRenderOffset(gate),
+      GATE_HEIGHT,
+      1,
+      0,
+    );
 
     mesh.userData.dynamicGate = {
       closedY: trackY + SURFACE_CLEARANCE + GATE_HEIGHT / 2,
@@ -377,22 +529,39 @@ function addFeatureMeshes(group: Group, track: TrackDefinition): void {
   }
 
   for (const [trapperIndex, trapper] of track.features.trappers.entries()) {
-    const sample = featureSampleAtDistance(track, trapper.distance, trapperIndex);
+    const sample = featureSampleForFeature(track, trapper);
     const ring = new Group();
     const segmentCount = 10;
-    const ringRadius = Math.min(trapper.radius, Math.max(0.65, (sample.width ?? TRACK_WIDTH) / 2 - 0.55));
+    const ringRadius = Math.min(
+      trapper.radius,
+      Math.max(0.65, (sample.width ?? TRACK_WIDTH) / 2 - 0.55),
+    );
 
     for (let index = 0; index < segmentCount; index += 1) {
       const angle = (index / segmentCount) * Math.PI * 2;
-      const segment = new Mesh(new BoxGeometry(0.18, TRAPPER_HEIGHT, 0.52), trapperMaterial);
+      const segment = new Mesh(
+        new BoxGeometry(0.18, TRAPPER_HEIGHT, 0.52),
+        trapperMaterial,
+      );
       segment.userData.obstacleId = `trapper-${trapperIndex}-${index}`;
-      segment.position.set(Math.cos(angle) * ringRadius, 0, Math.sin(angle) * ringRadius);
+      segment.position.set(
+        Math.cos(angle) * ringRadius,
+        0,
+        Math.sin(angle) * ringRadius,
+      );
       segment.rotation.y = -angle;
       disableShadows(segment);
       ring.add(segment);
     }
 
-    const trackY = setUprightObstacleTransform(ring, sample, 0, TRAPPER_HEIGHT, 1, 0);
+    const trackY = setUprightObstacleTransform(
+      ring,
+      sample,
+      featureRenderOffset(trapper),
+      TRAPPER_HEIGHT,
+      1,
+      0,
+    );
     ring.userData.dynamicGate = {
       closedY: trackY + SURFACE_CLEARANCE + TRAPPER_HEIGHT / 2,
       phase: trapper.phase,
@@ -403,11 +572,21 @@ function addFeatureMeshes(group: Group, track: TrackDefinition): void {
   }
 
   for (const [index, spinner] of track.features.spinners.entries()) {
-    const sample = featureSampleAtDistance(track, spinner.distance, index);
+    const sample = featureSampleForFeature(track, spinner);
     const width = (sample.width ?? TRACK_WIDTH) * 0.9;
-    const mesh = new Mesh(new BoxGeometry(width, SPINNER_HEIGHT, 0.24), spinnerMaterial);
+    const mesh = new Mesh(
+      new BoxGeometry(width, SPINNER_HEIGHT, 0.24),
+      spinnerMaterial,
+    );
 
-    setUprightObstacleTransform(mesh, sample, 0, SPINNER_HEIGHT, 1, spinner.phase);
+    setUprightObstacleTransform(
+      mesh,
+      sample,
+      featureRenderOffset(spinner),
+      SPINNER_HEIGHT,
+      1,
+      spinner.phase,
+    );
     mesh.position.y += SPINNER_TRACK_LIFT;
     mesh.userData.dynamicSpinner = {
       yaw: sample.yaw,
@@ -421,10 +600,20 @@ function addFeatureMeshes(group: Group, track: TrackDefinition): void {
   }
 
   for (const [index, hammer] of track.features.hammers.entries()) {
-    const sample = featureSampleAtDistance(track, hammer.distance, index);
-    const mesh = new Mesh(new BoxGeometry(0.64, HAMMER_HEIGHT, 3.1), hammerMaterial);
+    const sample = featureSampleForFeature(track, hammer);
+    const mesh = new Mesh(
+      new BoxGeometry(0.64, HAMMER_HEIGHT, 3.1),
+      hammerMaterial,
+    );
 
-    setUprightObstacleTransform(mesh, sample, 0, HAMMER_HEIGHT, 1, Math.PI / 2);
+    setUprightObstacleTransform(
+      mesh,
+      sample,
+      featureRenderOffset(hammer),
+      HAMMER_HEIGHT,
+      1,
+      Math.PI / 2,
+    );
     mesh.userData.dynamicHammer = {
       yaw: sample.yaw + Math.PI / 2,
       phase: hammer.phase,
@@ -437,20 +626,30 @@ function addFeatureMeshes(group: Group, track: TrackDefinition): void {
   }
 
   for (const [index, turnstile] of track.features.turnstiles.entries()) {
-    const sample = featureSampleAtDistance(track, turnstile.distance, index);
+    const sample = featureSampleForFeature(track, turnstile);
     const width = (sample.width ?? TRACK_WIDTH) * 0.58;
     const hub = new Group();
-    const a = new Mesh(new BoxGeometry(width, TURNSTILE_HEIGHT, 0.26), spinnerMaterial);
-    const b = new Mesh(new BoxGeometry(0.26, TURNSTILE_HEIGHT, width), spinnerMaterial);
+    const a = new Mesh(
+      new BoxGeometry(width, TURNSTILE_HEIGHT, 0.26),
+      spinnerMaterial,
+    );
+    const b = new Mesh(
+      new BoxGeometry(0.26, TURNSTILE_HEIGHT, width),
+      spinnerMaterial,
+    );
 
     disableShadows(a);
     disableShadows(b);
 
     hub.add(a, b);
+    const turnstileOffset = featureRenderOffset(turnstile);
     hub.position.set(
-      sample.x,
-      sample.y + SURFACE_CLEARANCE + TURNSTILE_HEIGHT / 2 + TURNSTILE_TRACK_LIFT,
-      sample.z,
+      sample.x + sample.normal.x * turnstileOffset,
+      surfaceYAtOffset(sample, turnstileOffset) +
+        SURFACE_CLEARANCE +
+        TURNSTILE_HEIGHT / 2 +
+        TURNSTILE_TRACK_LIFT,
+      sample.z + sample.normal.z * turnstileOffset,
     );
     hub.rotation.order = "YXZ";
     hub.rotation.y = sample.yaw + turnstile.phase;
@@ -467,7 +666,7 @@ function addFeatureMeshes(group: Group, track: TrackDefinition): void {
   }
 
   for (const [powerupIndex, powerup] of track.features.powerups.entries()) {
-    const sample = featureSampleAtDistance(track, powerup.distance, powerupIndex);
+    const sample = featureSampleForFeature(track, powerup);
     const color = new Color(0xdff8ff);
     const mesh = new Mesh(
       powerupGeometry,
@@ -481,9 +680,9 @@ function addFeatureMeshes(group: Group, track: TrackDefinition): void {
     );
 
     mesh.position.set(
-      sample.x + sample.normal.x * powerup.offset,
-      surfaceYAtOffset(sample, powerup.offset) + 0.55,
-      sample.z + sample.normal.z * powerup.offset,
+      sample.x + sample.normal.x * featureRenderOffset(powerup),
+      surfaceYAtOffset(sample, featureRenderOffset(powerup)) + 0.55,
+      sample.z + sample.normal.z * featureRenderOffset(powerup),
     );
     mesh.userData.powerupId = powerup.id;
     disableShadows(mesh);
@@ -505,8 +704,10 @@ function createThickRibbon(
     const width = sample.width ?? TRACK_WIDTH;
     const leftOffset = -width / 2;
     const rightOffset = width / 2;
-    const leftY = sample.y + ROAD_SURFACE_OFFSET + Math.sin(sample.bank ?? 0) * leftOffset;
-    const rightY = sample.y + ROAD_SURFACE_OFFSET + Math.sin(sample.bank ?? 0) * rightOffset;
+    const leftY =
+      sample.y + ROAD_SURFACE_OFFSET + Math.sin(sample.bank ?? 0) * leftOffset;
+    const rightY =
+      sample.y + ROAD_SURFACE_OFFSET + Math.sin(sample.bank ?? 0) * rightOffset;
 
     positions.push(
       sample.x + sample.normal.x * leftOffset,
@@ -529,7 +730,8 @@ function createThickRibbon(
     if (index < samples.length - 1) {
       const start = index * 4;
       const next = start + 4;
-      const segmentDistance = (sample.distance + samples[index + 1].distance) / 2;
+      const segmentDistance =
+        (sample.distance + samples[index + 1].distance) / 2;
 
       if (isRoadSegmentGap(segmentDistance, gaps)) {
         continue;
@@ -537,20 +739,36 @@ function createThickRibbon(
 
       indices.push(
         // top
-        start, next, start + 1,
-        start + 1, next, next + 1,
+        start,
+        next,
+        start + 1,
+        start + 1,
+        next,
+        next + 1,
 
         // bottom
-        start + 2, start + 3, next + 2,
-        start + 3, next + 3, next + 2,
+        start + 2,
+        start + 3,
+        next + 2,
+        start + 3,
+        next + 3,
+        next + 2,
 
         // left side
-        start, start + 2, next,
-        start + 2, next + 2, next,
+        start,
+        start + 2,
+        next,
+        start + 2,
+        next + 2,
+        next,
 
         // right side
-        start + 1, next + 1, start + 3,
-        start + 3, next + 1, next + 3,
+        start + 1,
+        next + 1,
+        start + 3,
+        start + 3,
+        next + 1,
+        next + 3,
       );
     }
   }
@@ -561,12 +779,20 @@ function createThickRibbon(
 
     indices.push(
       // start cap
-      first, first + 1, first + 2,
-      first + 1, first + 3, first + 2,
+      first,
+      first + 1,
+      first + 2,
+      first + 1,
+      first + 3,
+      first + 2,
 
       // end cap
-      last, last + 2, last + 1,
-      last + 1, last + 2, last + 3,
+      last,
+      last + 2,
+      last + 1,
+      last + 1,
+      last + 2,
+      last + 3,
     );
   }
 
@@ -576,7 +802,9 @@ function createThickRibbon(
   };
 }
 
-function createBranchRibbon(samples: TrackDefinition["samples"]): TrackMeshData {
+function createBranchRibbon(
+  samples: TrackDefinition["samples"],
+): TrackMeshData {
   const positions: number[] = [];
   const indices: number[] = [];
 
@@ -585,8 +813,10 @@ function createBranchRibbon(samples: TrackDefinition["samples"]): TrackMeshData 
     const width = sample.width ?? TRACK_WIDTH;
     const leftOffset = -width / 2;
     const rightOffset = width / 2;
-    const leftY = sample.y + ROAD_SURFACE_OFFSET + Math.sin(sample.bank ?? 0) * leftOffset;
-    const rightY = sample.y + ROAD_SURFACE_OFFSET + Math.sin(sample.bank ?? 0) * rightOffset;
+    const leftY =
+      sample.y + ROAD_SURFACE_OFFSET + Math.sin(sample.bank ?? 0) * leftOffset;
+    const rightY =
+      sample.y + ROAD_SURFACE_OFFSET + Math.sin(sample.bank ?? 0) * rightOffset;
 
     positions.push(
       sample.x + sample.normal.x * leftOffset,
@@ -600,7 +830,14 @@ function createBranchRibbon(samples: TrackDefinition["samples"]): TrackMeshData 
 
     if (index < samples.length - 1) {
       const start = index * 2;
-      indices.push(start, start + 2, start + 1, start + 1, start + 2, start + 3);
+      indices.push(
+        start,
+        start + 2,
+        start + 1,
+        start + 1,
+        start + 2,
+        start + 3,
+      );
     }
   }
 
@@ -618,12 +855,21 @@ function splitBranchLaneSamples(
   return branch.samples;
 }
 
-function isRoadSegmentGap(distance: number, gaps: Array<{ startDistance: number; endDistance: number }>): boolean {
-  return gaps.some((gap) => distance > gap.startDistance && distance < gap.endDistance);
+function isRoadSegmentGap(
+  distance: number,
+  gaps: Array<{ startDistance: number; endDistance: number }>,
+): boolean {
+  return gaps.some(
+    (gap) => distance > gap.startDistance && distance < gap.endDistance,
+  );
 }
 
 type WallPoint = BoundaryPoint;
-type BoundaryWall = { points: WallPoint[]; closed: boolean; outwardSign: 1 | -1 };
+type BoundaryWall = {
+  points: WallPoint[];
+  closed: boolean;
+  outwardSign: 1 | -1;
+};
 
 type OffsetNormal = { x: number; z: number };
 
@@ -636,11 +882,19 @@ function splitWallBoundaries(track: TrackDefinition): BoundaryWall[] {
     // Split walls must be edge-anchored to the same boundary points used by the
     // split road mesh. Do not smooth them here: smoothing creates wall/road drift.
     if (leftOuter?.length >= 2) {
-      walls.push({ points: dedupeWallPoints(leftOuter), closed: false, outwardSign: -1 });
+      walls.push({
+        points: dedupeWallPoints(leftOuter),
+        closed: false,
+        outwardSign: -1,
+      });
     }
 
     if (rightOuter?.length >= 2) {
-      walls.push({ points: dedupeWallPoints(rightOuter), closed: false, outwardSign: 1 });
+      walls.push({
+        points: dedupeWallPoints(rightOuter),
+        closed: false,
+        outwardSign: 1,
+      });
     }
 
     if (surface.innerBoundary.length >= 3) {
@@ -674,7 +928,11 @@ function signedAreaXZ(points: WallPoint[]): number {
   return area / 2;
 }
 
-function createWallAlongBoundary(points: WallPoint[], closed: boolean, outwardSign: 1 | -1): TrackMeshData {
+function createWallAlongBoundary(
+  points: WallPoint[],
+  closed: boolean,
+  outwardSign: 1 | -1,
+): TrackMeshData {
   const cleanPoints = dedupeWallPoints(points);
   const count = cleanPoints.length;
 
@@ -699,10 +957,18 @@ function createWallAlongBoundary(points: WallPoint[], closed: boolean, outwardSi
     const outerZ = point.z + normal.z * WALL_THICKNESS;
 
     positions.push(
-      point.x, bottomY, point.z,
-      point.x, topY, point.z,
-      outerX, bottomY, outerZ,
-      outerX, topY, outerZ,
+      point.x,
+      bottomY,
+      point.z,
+      point.x,
+      topY,
+      point.z,
+      outerX,
+      bottomY,
+      outerZ,
+      outerX,
+      topY,
+      outerZ,
     );
   }
 
@@ -711,7 +977,9 @@ function createWallAlongBoundary(points: WallPoint[], closed: boolean, outwardSi
   for (let index = 0; index < segmentCount; index += 1) {
     const nextIndex = (index + 1) % count;
 
-    if (horizontalDistanceXZ(cleanPoints[index], cleanPoints[nextIndex]) < 0.035) {
+    if (
+      horizontalDistanceXZ(cleanPoints[index], cleanPoints[nextIndex]) < 0.035
+    ) {
       continue;
     }
 
@@ -721,61 +989,104 @@ function createWallAlongBoundary(points: WallPoint[], closed: boolean, outwardSi
     if (outwardSign < 0) {
       indices.push(
         // inner face, exact road edge
-        start, start + 1, next,
-        start + 1, next + 1, next,
+        start,
+        start + 1,
+        next,
+        start + 1,
+        next + 1,
+        next,
 
         // outer face
-        start + 2, next + 2, start + 3,
-        start + 3, next + 2, next + 3,
+        start + 2,
+        next + 2,
+        start + 3,
+        start + 3,
+        next + 2,
+        next + 3,
 
         // top
-        start + 1, start + 3, next + 1,
-        start + 3, next + 3, next + 1,
+        start + 1,
+        start + 3,
+        next + 1,
+        start + 3,
+        next + 3,
+        next + 1,
 
         // bottom
-        start, next, start + 2,
-        start + 2, next, next + 2,
+        start,
+        next,
+        start + 2,
+        start + 2,
+        next,
+        next + 2,
       );
     } else {
       indices.push(
         // inner face, exact road edge
-        start, next, start + 1,
-        start + 1, next, next + 1,
+        start,
+        next,
+        start + 1,
+        start + 1,
+        next,
+        next + 1,
 
         // outer face
-        start + 2, start + 3, next + 2,
-        start + 3, next + 3, next + 2,
+        start + 2,
+        start + 3,
+        next + 2,
+        start + 3,
+        next + 3,
+        next + 2,
 
         // top
-        start + 1, next + 1, start + 3,
-        start + 3, next + 1, next + 3,
+        start + 1,
+        next + 1,
+        start + 3,
+        start + 3,
+        next + 1,
+        next + 3,
 
         // bottom
-        start, start + 2, next,
-        start + 2, next + 2, next,
+        start,
+        start + 2,
+        next,
+        start + 2,
+        next + 2,
+        next,
       );
     }
   }
 
-  return { vertices: new Float32Array(positions), indices: new Uint32Array(indices) };
+  return {
+    vertices: new Float32Array(positions),
+    indices: new Uint32Array(indices),
+  };
 }
 
 function horizontalDistanceXZ(a: WallPoint, b: WallPoint): number {
   return Math.hypot(a.x - b.x, a.z - b.z);
 }
 
-function computeOffsetNormals(points: WallPoint[], closed: boolean, outwardSign: 1 | -1): OffsetNormal[] {
+function computeOffsetNormals(
+  points: WallPoint[],
+  closed: boolean,
+  outwardSign: 1 | -1,
+): OffsetNormal[] {
   const normals: OffsetNormal[] = [];
   const count = points.length;
 
   for (let index = 0; index < count; index += 1) {
     if (!closed && index === 0) {
-      normals.push(segmentOffsetNormal(points[index], points[index + 1], outwardSign));
+      normals.push(
+        segmentOffsetNormal(points[index], points[index + 1], outwardSign),
+      );
       continue;
     }
 
     if (!closed && index === count - 1) {
-      normals.push(segmentOffsetNormal(points[index - 1], points[index], outwardSign));
+      normals.push(
+        segmentOffsetNormal(points[index - 1], points[index], outwardSign),
+      );
       continue;
     }
 
@@ -805,7 +1116,11 @@ function computeOffsetNormals(points: WallPoint[], closed: boolean, outwardSign:
   return normals;
 }
 
-function segmentOffsetNormal(a: WallPoint, b: WallPoint, outwardSign: 1 | -1): OffsetNormal {
+function segmentOffsetNormal(
+  a: WallPoint,
+  b: WallPoint,
+  outwardSign: 1 | -1,
+): OffsetNormal {
   const dx = b.x - a.x;
   const dz = b.z - a.z;
   const length = Math.hypot(dx, dz) || 1;
@@ -823,11 +1138,21 @@ function dedupeWallPoints(points: WallPoint[]): WallPoint[] {
     }
 
     const previous = points[index - 1];
-    return Math.hypot(point.x - previous.x, point.y - previous.y, point.z - previous.z) > 0.05;
+    return (
+      Math.hypot(
+        point.x - previous.x,
+        point.y - previous.y,
+        point.z - previous.z,
+      ) > 0.05
+    );
   });
 }
 
-function smoothWallPath(points: WallPoint[], closed: boolean, iterations: number): WallPoint[] {
+function smoothWallPath(
+  points: WallPoint[],
+  closed: boolean,
+  iterations: number,
+): WallPoint[] {
   let smoothed = dedupeWallPoints(points);
 
   for (let iteration = 0; iteration < iterations; iteration += 1) {
@@ -910,64 +1235,90 @@ function createThickWall(
     if (index < samples.length - 1) {
       const start = index * 4;
       const next = start + 4;
-      const segmentDistance = (sample.distance + samples[index + 1].distance) / 2;
+      const segmentDistance =
+        (sample.distance + samples[index + 1].distance) / 2;
 
-      const skipReason = wallSegmentSkipReason(track, samples, index, side, widthScale, applyTrackGaps, suppressCoveredEdges);
+      const skipReason = wallSegmentSkipReason(
+        track,
+        samples,
+        index,
+        side,
+        widthScale,
+        applyTrackGaps,
+        suppressCoveredEdges,
+      );
 
       if (skipReason !== "none") {
-        const previousIsMissing =
-          index > 0 &&
-          wallSegmentSkipReason(track, samples, index - 1, side, widthScale, applyTrackGaps, suppressCoveredEdges) !== "none";
-        const nextIsMissing =
-          index < samples.length - 2 &&
-          wallSegmentSkipReason(track, samples, index + 1, side, widthScale, applyTrackGaps, suppressCoveredEdges) !== "none";
-
-        if (skipReason === "missingWall" && !previousIsMissing) {
-          addWallEndCap(indices, start);
-        }
-
-        if (skipReason === "missingWall" && !nextIsMissing) {
-          addWallEndCap(indices, next);
-        }
-
         continue;
       }
 
       if (side < 0) {
         indices.push(
           // inner face
-          start, start + 1, next,
-          start + 1, next + 1, next,
+          start,
+          start + 1,
+          next,
+          start + 1,
+          next + 1,
+          next,
 
           // outer face
-          start + 2, next + 2, start + 3,
-          start + 3, next + 2, next + 3,
+          start + 2,
+          next + 2,
+          start + 3,
+          start + 3,
+          next + 2,
+          next + 3,
 
           // top
-          start + 1, start + 3, next + 1,
-          start + 3, next + 3, next + 1,
+          start + 1,
+          start + 3,
+          next + 1,
+          start + 3,
+          next + 3,
+          next + 1,
 
           // bottom
-          start, next, start + 2,
-          start + 2, next, next + 2,
+          start,
+          next,
+          start + 2,
+          start + 2,
+          next,
+          next + 2,
         );
       } else {
         indices.push(
           // inner face
-          start, next, start + 1,
-          start + 1, next, next + 1,
+          start,
+          next,
+          start + 1,
+          start + 1,
+          next,
+          next + 1,
 
           // outer face
-          start + 2, start + 3, next + 2,
-          start + 3, next + 3, next + 2,
+          start + 2,
+          start + 3,
+          next + 2,
+          start + 3,
+          next + 3,
+          next + 2,
 
           // top
-          start + 1, next + 1, start + 3,
-          start + 3, next + 1, next + 3,
+          start + 1,
+          next + 1,
+          start + 3,
+          start + 3,
+          next + 1,
+          next + 3,
 
           // bottom
-          start, start + 2, next,
-          start + 2, next + 2, next,
+          start,
+          start + 2,
+          next,
+          start + 2,
+          next + 2,
+          next,
         );
       }
     }
@@ -979,12 +1330,20 @@ function createThickWall(
 
     indices.push(
       // start cap
-      first, first + 2, first + 1,
-      first + 1, first + 2, first + 3,
+      first,
+      first + 2,
+      first + 1,
+      first + 1,
+      first + 2,
+      first + 3,
 
       // end cap
-      last, last + 1, last + 2,
-      last + 1, last + 3, last + 2,
+      last,
+      last + 1,
+      last + 2,
+      last + 1,
+      last + 3,
+      last + 2,
     );
   }
 
@@ -1002,20 +1361,19 @@ function wallSegmentSkipReason(
   widthScale: number,
   applyTrackGaps: boolean,
   suppressCoveredEdges: boolean,
-): "none" | "covered" | "missingWall" {
+): "none" | "covered" {
   const sample = samples[index];
   const next = samples[index + 1];
   const segmentDistance = (sample.distance + next.distance) / 2;
-
-  if (applyTrackGaps && isWallSegmentMissing(track, segmentDistance, side)) {
-    return "missingWall";
-  }
 
   if (applyTrackGaps && isSplitWallJunctionGap(track, segmentDistance, side)) {
     return "covered";
   }
 
-  if (suppressCoveredEdges && isWallEdgeCoveredByRoad(track, samples, sample, next, side, widthScale)) {
+  if (
+    suppressCoveredEdges &&
+    isWallEdgeCoveredByRoad(track, samples, sample, next, side, widthScale)
+  ) {
     return "covered";
   }
 
@@ -1023,28 +1381,26 @@ function wallSegmentSkipReason(
 }
 
 function addWallEndCap(indices: number[], start: number): void {
-  indices.push(
-    start, start + 2, start + 1,
-    start + 1, start + 2, start + 3,
-  );
+  indices.push(start, start + 2, start + 1, start + 1, start + 2, start + 3);
 }
 
-function isWallSegmentGap(track: TrackDefinition, distance: number, side: -1 | 1): boolean {
-  return isSplitWallJunctionGap(track, distance, side) || isWallSegmentMissing(track, distance, side);
+function isWallSegmentGap(
+  track: TrackDefinition,
+  distance: number,
+  side: -1 | 1,
+): boolean {
+  return isSplitWallJunctionGap(track, distance, side);
 }
 
-function isWallSegmentMissing(track: TrackDefinition, distance: number, side: -1 | 1): boolean {
-  return track.features.missingWallSegments.some(
-    (segment) =>
-      segment.side === side &&
-      Math.abs(distance - segment.distance) <= segment.length / 2,
-  );
-}
-
-function isSplitWallJunctionGap(track: TrackDefinition, distance: number, side: -1 | 1): boolean {
+function isSplitWallJunctionGap(
+  track: TrackDefinition,
+  distance: number,
+  side: -1 | 1,
+): boolean {
   void side;
   return track.splitSurfaces.some(
-    (surface) => distance > surface.startDistance && distance < surface.endDistance,
+    (surface) =>
+      distance > surface.startDistance && distance < surface.endDistance,
   );
 }
 
@@ -1057,29 +1413,46 @@ function isWallEdgeCoveredByRoad(
   widthScale: number,
 ): boolean {
   const distance = (sample.distance + next.distance) / 2;
-  const width = (((sample.width ?? TRACK_WIDTH) + (next.width ?? TRACK_WIDTH)) / 2) * widthScale;
+  const width =
+    (((sample.width ?? TRACK_WIDTH) + (next.width ?? TRACK_WIDTH)) / 2) *
+    widthScale;
   const edgeOffset = side * (width / 2 - 0.02);
   const bank = ((sample.bank ?? 0) + (next.bank ?? 0)) / 2;
   const midpoint = {
-    x: (sample.x + next.x) / 2 + ((sample.normal.x + next.normal.x) / 2) * edgeOffset,
+    x:
+      (sample.x + next.x) / 2 +
+      ((sample.normal.x + next.normal.x) / 2) * edgeOffset,
     y: (sample.y + next.y) / 2 + Math.sin(bank) * edgeOffset,
-    z: (sample.z + next.z) / 2 + ((sample.normal.z + next.normal.z) / 2) * edgeOffset,
+    z:
+      (sample.z + next.z) / 2 +
+      ((sample.normal.z + next.normal.z) / 2) * edgeOffset,
   };
 
   for (const routeSamples of roadSurfaceRoutes(track)) {
-    if (routeSamples === ownSamples || !isRoadSurfaceActive(track, routeSamples, distance)) {
+    if (
+      routeSamples === ownSamples ||
+      !isRoadSurfaceActive(track, routeSamples, distance)
+    ) {
       continue;
     }
 
     const roadSample = sampleAtDistance(routeSamples, distance);
     const dx = midpoint.x - roadSample.x;
     const dz = midpoint.z - roadSample.z;
-    const lateral = Math.abs(dx * roadSample.normal.x + dz * roadSample.normal.z);
+    const lateral = Math.abs(
+      dx * roadSample.normal.x + dz * roadSample.normal.z,
+    );
     const horizontal = Math.hypot(dx, dz);
-    const vertical = Math.abs(midpoint.y - (roadSample.y + Math.sin(roadSample.bank ?? 0) * lateral));
+    const vertical = Math.abs(
+      midpoint.y - (roadSample.y + Math.sin(roadSample.bank ?? 0) * lateral),
+    );
     const roadHalfWidth = (roadSample.width ?? TRACK_WIDTH) / 2;
 
-    if (lateral <= roadHalfWidth - 0.08 && horizontal <= roadHalfWidth + 0.75 && vertical <= 0.9) {
+    if (
+      lateral <= roadHalfWidth - 0.08 &&
+      horizontal <= roadHalfWidth + 0.75 &&
+      vertical <= 0.9
+    ) {
       return true;
     }
   }
@@ -1087,7 +1460,9 @@ function isWallEdgeCoveredByRoad(
   return false;
 }
 
-function roadSurfaceRoutes(track: TrackDefinition): Array<TrackDefinition["samples"]> {
+function roadSurfaceRoutes(
+  track: TrackDefinition,
+): Array<TrackDefinition["samples"]> {
   return [track.samples, ...track.branches.map((branch) => branch.samples)];
 }
 
@@ -1098,12 +1473,16 @@ function isRoadSurfaceActive(
 ): boolean {
   if (samples === track.samples) {
     return !track.splitSurfaces.some(
-      (surface) => distance > surface.startDistance && distance < surface.endDistance,
+      (surface) =>
+        distance > surface.startDistance && distance < surface.endDistance,
     );
   }
 
   return track.branches.some(
-    (branch) => branch.samples === samples && distance >= branch.startDistance && distance <= branch.endDistance,
+    (branch) =>
+      branch.samples === samples &&
+      distance >= branch.startDistance &&
+      distance <= branch.endDistance,
   );
 }
 
@@ -1127,7 +1506,8 @@ function pegExtensionAtTime(time: number, phase = 0): number {
     return 0;
   }
 
-  const raiseStart = PEG_HOLD_UP_SECONDS + PEG_LOWER_SECONDS + PEG_HOLD_DOWN_SECONDS;
+  const raiseStart =
+    PEG_HOLD_UP_SECONDS + PEG_LOWER_SECONDS + PEG_HOLD_DOWN_SECONDS;
   return smoothstep(0, 1, (t - raiseStart) / PEG_RAISE_SECONDS);
 }
 
@@ -1135,29 +1515,179 @@ function greenBumperPhase(index: number, distance: number): number {
   return obstacleCycleValue(index * 3.7 + distance * 0.13, 0);
 }
 
-function surfaceYAtOffset(sample: TrackDefinition["samples"][number], offset: number): number {
+function surfaceYAtOffset(
+  sample: TrackDefinition["samples"][number],
+  offset: number,
+): number {
   return sample.y + Math.sin(sample.bank ?? 0) * offset;
 }
 
-function featureSampleAtDistance(
+function featureSampleForFeature(
   track: TrackDefinition,
-  distance: number,
-  featureIndex: number,
+  feature: RouteAwareFeature,
 ): TrackDefinition["samples"][number] {
-  const branchCandidates = track.branches.filter(
-    (branch) => distance >= branch.startDistance && distance <= branch.endDistance,
-  );
+  const routeId = feature.routeId ?? "";
 
-  if (branchCandidates.length === 0) {
-    return sampleAtDistance(track.samples, distance);
+  if (routeId.startsWith("split-")) {
+    const match = /^split-(\d+)-(left|right)$/.exec(routeId);
+
+    if (match) {
+      const splitIndex = Number(match[1]);
+      const side = match[2] === "left" ? -1 : 1;
+      const surface = track.splitSurfaces[splitIndex];
+
+      if (surface) {
+        return splitSurfaceSampleAtDistance(surface, feature.distance, side);
+      }
+
+      const branch = track.branches.find(
+        (candidate, index) =>
+          Math.floor(index / 2) === splitIndex && candidate.side === side,
+      );
+
+      if (branch) {
+        return sampleAtDistance(branch.samples, feature.distance);
+      }
+    }
   }
 
-  return sampleAtDistance(branchCandidates[featureIndex % branchCandidates.length].samples, distance);
+  return sampleAtDistance(track.samples, feature.distance);
 }
 
-function verticalObstacleCenterY(trackY: number, fullHeight: number, extension: number): number {
+function featureRenderOffset(feature: RouteAwareFeature): number {
+  if (feature.routeId?.startsWith("split-")) {
+    return feature.routeOffset ?? feature.offset ?? 0;
+  }
+
+  return feature.routeOffset ?? feature.offset ?? 0;
+}
+
+function splitSurfaceSampleAtDistance(
+  surface: TrackDefinition["splitSurfaces"][number],
+  distance: number,
+  side: -1 | 1,
+): TrackDefinition["samples"][number] {
+  const rowSize = 8;
+  const vertices = surface.road.vertices;
+  const rowCount = Math.floor(vertices.length / (rowSize * 3));
+
+  if (rowCount <= 0) {
+    throw new Error("Cannot sample an empty split surface");
+  }
+
+  const alpha = clamp(
+    (distance - surface.startDistance) /
+      Math.max(surface.endDistance - surface.startDistance, 0.0001),
+    0,
+    1,
+  );
+  const row = clamp(Math.round(alpha * (rowCount - 1)), 0, rowCount - 1);
+  const previousRow = Math.max(0, row - 1);
+  const nextRow = Math.min(rowCount - 1, row + 1);
+  const leftColumn = side < 0 ? 0 : 4;
+  const rightColumn = side < 0 ? 3 : 7;
+  const left = splitSurfaceVertex(vertices, row, leftColumn, rowSize);
+  const right = splitSurfaceVertex(vertices, row, rightColumn, rowSize);
+  const previousCenter = splitSurfaceLaneCenter(
+    vertices,
+    previousRow,
+    leftColumn,
+    rightColumn,
+    rowSize,
+  );
+  const nextCenter = splitSurfaceLaneCenter(
+    vertices,
+    nextRow,
+    leftColumn,
+    rightColumn,
+    rowSize,
+  );
+  const center = midpoint3(left, right);
+  const tangent = normalize3({
+    x: nextCenter.x - previousCenter.x,
+    y: nextCenter.y - previousCenter.y,
+    z: nextCenter.z - previousCenter.z,
+  });
+  const normal = normalizeXZ({ x: right.x - left.x, z: right.z - left.z });
+  const width = Math.max(0.1, Math.hypot(right.x - left.x, right.z - left.z));
+
+  return {
+    x: center.x,
+    y: center.y,
+    z: center.z,
+    distance,
+    tangent,
+    normal,
+    yaw: Math.atan2(tangent.x, tangent.z),
+    width,
+    bank: Math.asin(clamp((right.y - left.y) / width, -0.35, 0.35)),
+    surfaceFriction: 0.18,
+  };
+}
+
+function splitSurfaceVertex(
+  vertices: Float32Array,
+  row: number,
+  column: number,
+  rowSize: number,
+): { x: number; y: number; z: number } {
+  const offset = (row * rowSize + column) * 3;
+  return {
+    x: vertices[offset],
+    y: vertices[offset + 1],
+    z: vertices[offset + 2],
+  };
+}
+
+function splitSurfaceLaneCenter(
+  vertices: Float32Array,
+  row: number,
+  leftColumn: number,
+  rightColumn: number,
+  rowSize: number,
+): { x: number; y: number; z: number } {
+  return midpoint3(
+    splitSurfaceVertex(vertices, row, leftColumn, rowSize),
+    splitSurfaceVertex(vertices, row, rightColumn, rowSize),
+  );
+}
+
+function midpoint3(
+  a: { x: number; y: number; z: number },
+  b: { x: number; y: number; z: number },
+): { x: number; y: number; z: number } {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+    z: (a.z + b.z) / 2,
+  };
+}
+
+function normalize3(value: { x: number; y: number; z: number }): {
+  x: number;
+  y: number;
+  z: number;
+} {
+  const length = Math.hypot(value.x, value.y, value.z) || 1;
+  return { x: value.x / length, y: value.y / length, z: value.z / length };
+}
+
+function normalizeXZ(value: { x: number; z: number }): {
+  x: number;
+  z: number;
+} {
+  const length = Math.hypot(value.x, value.z) || 1;
+  return { x: value.x / length, z: value.z / length };
+}
+
+function verticalObstacleCenterY(
+  trackY: number,
+  fullHeight: number,
+  extension: number,
+): number {
   const clampedExtension = Math.max(0.04, extension);
-  const visibleCenter = trackY + SURFACE_CLEARANCE + (fullHeight * clampedExtension) / 2;
+  const visibleCenter =
+    trackY + SURFACE_CLEARANCE + (fullHeight * clampedExtension) / 2;
   const hiddenCenter = trackY - PEG_RETRACT_DEPTH;
 
   return hiddenCenter + (visibleCenter - hiddenCenter) * clampedExtension;
@@ -1188,10 +1718,16 @@ function setUprightObstacleTransform(
   return trackY;
 }
 
-function toGeometry(data: TrackMeshData, smoothRoadSurface = false): BufferGeometry {
+function toGeometry(
+  data: TrackMeshData,
+  smoothRoadSurface = false,
+): BufferGeometry {
   const geometry = new BufferGeometry();
-  geometry.setAttribute("position", new Float32BufferAttribute(data.vertices, 3));
-  geometry.setIndex(Array.from(data.indices));
+  geometry.setAttribute(
+    "position",
+    new Float32BufferAttribute(data.vertices, 3),
+  );
+  geometry.setIndex(new Uint32BufferAttribute(data.indices, 1));
   geometry.computeVertexNormals();
 
   if (smoothRoadSurface) {
@@ -1210,27 +1746,28 @@ function toSplitRoadGeometry(data: TrackMeshData): BufferGeometry {
 function softenSplitRoadSurfaceNormals(geometry: BufferGeometry): void {
   const positions = geometry.getAttribute("position");
   const normals = geometry.getAttribute("normal");
+  const rowSize = positions.count % 8 === 0 ? 8 : 4;
 
-  if (positions.count < 4 || positions.count % 4 !== 0) {
+  if (positions.count < rowSize || positions.count % rowSize !== 0) {
     return;
   }
 
   // Use the same bank-style top normal as the default road mesh. The previous
   // split-only normal used longitudinal slope, so split floors reacted to light
   // differently and showed a visible material/color boundary at split joins.
-  for (let rowStart = 0; rowStart < positions.count; rowStart += 4) {
+  for (let rowStart = 0; rowStart < positions.count; rowStart += rowSize) {
     const leftTop = rowStart;
-    const rightTop = rowStart + 3;
+    const rightTop = rowStart + rowSize - 1;
     const dx = positions.getX(rightTop) - positions.getX(leftTop);
     const dy = positions.getY(rightTop) - positions.getY(leftTop);
     const dz = positions.getZ(rightTop) - positions.getZ(leftTop);
     const sideLength = Math.hypot(dx, dz) || 1;
     const bankNormalY = Math.max(0.6, sideLength / Math.hypot(dy, sideLength));
-    const bankNormalX = -dx * dy / (sideLength * sideLength + dy * dy || 1);
-    const bankNormalZ = -dz * dy / (sideLength * sideLength + dy * dy || 1);
+    const bankNormalX = (-dx * dy) / (sideLength * sideLength + dy * dy || 1);
+    const bankNormalZ = (-dz * dy) / (sideLength * sideLength + dy * dy || 1);
     const normalLength = Math.hypot(bankNormalX, bankNormalY, bankNormalZ) || 1;
 
-    for (let offset = 0; offset < 4; offset += 1) {
+    for (let offset = 0; offset < rowSize; offset += 1) {
       normals.setXYZ(
         rowStart + offset,
         bankNormalX / normalLength,
@@ -1243,7 +1780,10 @@ function softenSplitRoadSurfaceNormals(geometry: BufferGeometry): void {
   normals.needsUpdate = true;
 }
 
-function averageSplitRowCenter(positions: BufferAttribute | Float32BufferAttribute, rowStart: number): { x: number; y: number; z: number } {
+function averageSplitRowCenter(
+  positions: BufferAttribute | Float32BufferAttribute,
+  rowStart: number,
+): { x: number; y: number; z: number } {
   return {
     x: (positions.getX(rowStart) + positions.getX(rowStart + 3)) / 2,
     y: (positions.getY(rowStart) + positions.getY(rowStart + 3)) / 2,
@@ -1262,7 +1802,11 @@ function crossVectors(
   };
 }
 
-function normalizeVector3(value: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+function normalizeVector3(value: { x: number; y: number; z: number }): {
+  x: number;
+  y: number;
+  z: number;
+} {
   const length = Math.hypot(value.x, value.y, value.z) || 1;
   return { x: value.x / length, y: value.y / length, z: value.z / length };
 }
@@ -1284,18 +1828,35 @@ function softenRoadSurfaceNormals(geometry: BufferGeometry): void {
     const dz = positions.getZ(rightTop) - positions.getZ(leftTop);
     const sideLength = Math.hypot(dx, dz) || 1;
     const bankNormalY = Math.max(0.6, sideLength / Math.hypot(dy, sideLength));
-    const bankNormalX = -dx * dy / (sideLength * sideLength + dy * dy || 1);
-    const bankNormalZ = -dz * dy / (sideLength * sideLength + dy * dy || 1);
+    const bankNormalX = (-dx * dy) / (sideLength * sideLength + dy * dy || 1);
+    const bankNormalZ = (-dz * dy) / (sideLength * sideLength + dy * dy || 1);
     const normalLength = Math.hypot(bankNormalX, bankNormalY, bankNormalZ) || 1;
 
-    normals.setXYZ(leftTop, bankNormalX / normalLength, bankNormalY / normalLength, bankNormalZ / normalLength);
-    normals.setXYZ(rightTop, bankNormalX / normalLength, bankNormalY / normalLength, bankNormalZ / normalLength);
+    normals.setXYZ(
+      leftTop,
+      bankNormalX / normalLength,
+      bankNormalY / normalLength,
+      bankNormalZ / normalLength,
+    );
+    normals.setXYZ(
+      rightTop,
+      bankNormalX / normalLength,
+      bankNormalY / normalLength,
+      bankNormalZ / normalLength,
+    );
   }
 
   normals.needsUpdate = true;
 }
 
-function setTrackTransform(mesh: Mesh, x: number, y: number, z: number, yaw: number, bank = 0): void {
+function setTrackTransform(
+  mesh: Mesh,
+  x: number,
+  y: number,
+  z: number,
+  yaw: number,
+  bank = 0,
+): void {
   mesh.position.set(x, y, z);
   mesh.rotation.order = "YXZ";
   mesh.rotation.y = yaw;
@@ -1348,3 +1909,5 @@ function smoothstep(edge0: number, edge1: number, value: number): number {
 
   return t * t * (3 - 2 * t);
 }
+
+

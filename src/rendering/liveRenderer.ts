@@ -561,38 +561,78 @@ function createLabelOverlay(canvas: HTMLCanvasElement): HTMLElement {
 }
 
 function trackRenderSignature(track: TrackDefinition): string {
+  const featureSignature = (feature: {
+    distance: number;
+    offset?: number;
+    routeId?: string;
+    routeOffset?: number;
+    mainOffset?: number;
+    x?: number;
+    y?: number;
+    z?: number;
+    yaw?: number;
+    width?: number;
+  }) => ({
+    distance: roundSignatureNumber(feature.distance),
+    offset: roundSignatureNumber(feature.offset ?? 0),
+    routeId: feature.routeId ?? "main",
+    routeOffset: roundSignatureNumber(feature.routeOffset ?? feature.offset ?? 0),
+    mainOffset: roundSignatureNumber(feature.mainOffset ?? 0),
+    x: roundSignatureNumber(feature.x ?? 0),
+    y: roundSignatureNumber(feature.y ?? 0),
+    z: roundSignatureNumber(feature.z ?? 0),
+    yaw: roundSignatureNumber(feature.yaw ?? 0),
+    width: roundSignatureNumber(feature.width ?? 0),
+  });
+
   return JSON.stringify({
     seed: track.seed,
+    totalLength: roundSignatureNumber(track.totalLength),
+    finishDistance: roundSignatureNumber(track.finishDistance),
+    splitSurfaces: track.splitSurfaces.map((surface) => ({
+      startDistance: roundSignatureNumber(surface.startDistance),
+      endDistance: roundSignatureNumber(surface.endDistance),
+      vertices: surface.road.vertices.length,
+      indices: surface.road.indices.length,
+    })),
     pegs: track.features.pegs.map((peg) => ({
-      distance: roundSignatureNumber(peg.distance),
-      offset: roundSignatureNumber(peg.offset),
+      ...featureSignature(peg),
       radius: roundSignatureNumber(peg.radius),
       phase: roundSignatureNumber(peg.phase),
     })),
     greenBumpers: track.features.greenBumpers.map((bumper) => ({
-      distance: roundSignatureNumber(bumper.distance),
-      offset: roundSignatureNumber(bumper.offset),
+      ...featureSignature(bumper),
       radius: roundSignatureNumber(bumper.radius),
       phase: roundSignatureNumber((bumper as typeof bumper & { phase?: number }).phase ?? -1),
     })),
     gates: track.features.gates.map((gate) => ({
-      distance: roundSignatureNumber(gate.distance),
+      ...featureSignature(gate),
       phase: roundSignatureNumber(gate.phase),
     })),
+    trappers: track.features.trappers.map((trapper) => ({
+      ...featureSignature(trapper),
+      radius: roundSignatureNumber(trapper.radius),
+      phase: roundSignatureNumber(trapper.phase),
+    })),
     spinners: track.features.spinners.map((spinner) => ({
-      distance: roundSignatureNumber(spinner.distance),
+      ...featureSignature(spinner),
       phase: roundSignatureNumber(spinner.phase),
       speed: roundSignatureNumber(spinner.speed),
     })),
     hammers: track.features.hammers.map((hammer) => ({
-      distance: roundSignatureNumber(hammer.distance),
+      ...featureSignature(hammer),
       phase: roundSignatureNumber(hammer.phase),
       side: hammer.side,
     })),
     turnstiles: track.features.turnstiles.map((turnstile) => ({
-      distance: roundSignatureNumber(turnstile.distance),
+      ...featureSignature(turnstile),
       phase: roundSignatureNumber(turnstile.phase),
       speed: roundSignatureNumber(turnstile.speed),
+    })),
+    powerups: track.features.powerups.map((powerup) => ({
+      ...featureSignature(powerup),
+      id: powerup.id,
+      kind: powerup.kind,
     })),
   });
 }
@@ -612,3 +652,5 @@ function formatPowerupName(powerup: string): string {
 function roundSignatureNumber(value: number): number {
   return Math.round(value * 100000) / 100000;
 }
+
+
