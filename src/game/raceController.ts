@@ -18,7 +18,6 @@ const MUSIC_MANIFEST_URL = "/music/manifest.json";
 const SESSION_STORAGE_KEY = "marble-race-picker:current";
 const SAVED_SETUPS_STORAGE_KEY = "marble-race-picker:saved-setups";
 const STANDINGS_UPDATE_SECONDS = 0.2;
-const SESSION_SAVE_DEBOUNCE_MS = 250;
 const PREVIEW_TRACK_UPDATE_DEBOUNCE_MS = 220;
 
 type SavedSetup = SavedSetupSummary & {
@@ -52,9 +51,9 @@ export class RaceController {
   private livePaused = false;
   private busy = false;
   private standingsUpdateAccumulator = 0;
-  private saveSessionTimer = 0;
   private previewTrackTimer = 0;
   private pendingPreviewTrackKey = "";
+  private focusedBallId = "";
 
   constructor(config: RaceControllerConfig) {
     this.raceAudio.loop = true;
@@ -69,6 +68,8 @@ export class RaceController {
       onNewObstacleSeed: () => this.generateObstacleSeed(),
       onSaveConfig: (name) => this.saveCurrentSetup(name),
       onLoadConfig: (id) => this.loadSavedSetup(id),
+      onFocusBall: (ballId) => this.focusBall(ballId),
+      onClearFocus: () => this.clearFocus(),
     });
 
     this.renderer = new LiveRenderer(config.canvas);
@@ -114,8 +115,9 @@ export class RaceController {
     this.options = nextOptions;
     this.mapSeed = nextMapSeed;
     this.obstacleSeed = nextObstacleSeed;
-    this.scheduleStoredSessionSave();
+    this.saveStoredSession();
     this.stopLiveRace();
+    this.clearFocus();
 
     if (mapSeedChanged || obstacleSeedChanged) {
       this.schedulePreviewTrackUpdate();
@@ -191,6 +193,7 @@ export class RaceController {
 
   private resetRace(): void {
     this.stopLiveRace();
+    this.clearFocus();
 
     this.runtimeTrack = this.createPreviewTrack();
 
@@ -223,6 +226,7 @@ export class RaceController {
     const runtimeTrackForThisRun = this.createRuntimeTrack(obstacleRuntimeSeedForThisRun);
     this.runtimeTrack = runtimeTrackForThisRun;
     const optionsSignatureForThisRun = simulationSignature(options, seedForThisRun, obstacleSeedForThisRun, obstacleRuntimeSeedForThisRun);
+    this.clearFocus();
 
     this.busy = true;
     this.ui.setRuntimeState(this.renderState(true));
@@ -331,6 +335,23 @@ export class RaceController {
     this.stopRaceAudio(true);
   }
 
+  private focusBall(ballId: string): void {
+    this.focusedBallId = ballId;
+    this.renderer.setFocusedBall(ballId);
+    this.ui.setFocusMode(ballId);
+  }
+
+  private clearFocus(): void {
+    if (!this.focusedBallId) {
+      this.renderer.clearFocusedBall();
+      return;
+    }
+
+    this.focusedBallId = "";
+    this.renderer.clearFocusedBall();
+    this.ui.setFocusMode("");
+  }
+
   private async playRaceAudioFromStart(): Promise<void> {
     this.stopRaceAudio(true);
     await this.musicTracksReady;
@@ -431,6 +452,7 @@ export class RaceController {
             progressPercent: 100,
             status: "finished",
             statusText: "Finished",
+            focused: standing.id === this.focusedBallId,
           };
         }
 
@@ -444,6 +466,7 @@ export class RaceController {
             progressPercent: 0,
             status: "disqualified",
             statusText: standing.disqualification.reason || "DQ",
+            focused: standing.id === this.focusedBallId,
           };
         }
 
@@ -458,6 +481,7 @@ export class RaceController {
           color: standing.color,
           progressPercent: standing.progressPercent,
           status: "racing",
+          focused: standing.id === this.focusedBallId,
         };
       }),
     );
@@ -483,6 +507,7 @@ export class RaceController {
       savedSetups: this.savedSetups.map(({ id, name }) => ({ id, name })),
       selectedSetupId: this.selectedSetupId,
       setupName: this.setupName,
+      focusedBallId: this.focusedBallId,
     };
   }
 
@@ -520,14 +545,6 @@ export class RaceController {
 
   private saveStoredSession(setup = this.serializedSetup()): void {
     localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(setup));
-  }
-
-  private scheduleStoredSessionSave(): void {
-    window.clearTimeout(this.saveSessionTimer);
-    this.saveSessionTimer = window.setTimeout(() => {
-      this.saveStoredSession();
-      this.saveSessionTimer = 0;
-    }, SESSION_SAVE_DEBOUNCE_MS);
   }
 
   private schedulePreviewTrackUpdate(): void {
@@ -748,3 +765,5 @@ function normalizeStoredSetup(value: unknown): ControlsState | null {
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, Number.isFinite(value) ? value : min));
 }
+
+

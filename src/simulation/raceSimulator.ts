@@ -41,6 +41,8 @@ const PEG_RETRACT_DEPTH = 0.38;
 
 const DISQUALIFY_NO_CONTACT_SECONDS = 1.35;
 const FALL_RESPAWN_DELAY_SECONDS = 5;
+const FALL_REWIND_SECONDS = 3.0;
+const SAFE_HISTORY_RETENTION_SECONDS = 8.0;
 const FALL_DISQUALIFY_DROP = 8.0;
 const FALL_LATERAL_DISTANCE_SCALE = 1.8;
 const FALL_LATERAL_DISTANCE_EXTRA = 1.2;
@@ -142,6 +144,7 @@ const HAMMER_RESTITUTION = 0.22;
 const TURNSTILE_FRICTION = 0.35;
 const TURNSTILE_RESTITUTION = 0.08;
 const POWERUP_DURATION = 10;
+const SLOW_POWERUP_DURATION = POWERUP_DURATION / 3;
 const POWERUP_RESPAWN_SECONDS = 10;
 const POWERUP_PICKUP_RADIUS = 0.72;
 const POWERUP_KINDS: PowerupKind[] = ["speed", "giant", "tiny", "ghost", "slow", "barrier", "smash"];
@@ -181,6 +184,10 @@ type PendingRespawn = {
   safeState: SafeBallState;
 };
 
+type SafeCheckpoint = SafeBallState & {
+  time: number;
+};
+
 export type LiveRaceSimulation = {
   result: RaceResult;
   getFrame: () => RaceFrame;
@@ -213,8 +220,6 @@ type DynamicBody = {
   speed: number;
 };
 
-const routeSamplesByTrack = new WeakMap<TrackDefinition, TrackDefinition["samples"]>();
-
 export async function prepareRapier(): Promise<void> {
   await Promise.resolve();
 }
@@ -228,6 +233,7 @@ export function createLiveRace(config: RaceConfig): LiveRaceSimulation {
   const frameStateByBall = new Map<string, BallFrameState>();
   const noContactSecondsByBall = new Map<string, number>();
   const safeStateByBall = new Map<string, SafeBallState>();
+  const safeHistoryByBall = new Map<string, SafeCheckpoint[]>();
   const pendingRespawnsByBall = new Map<string, PendingRespawn>();
   const terminalStillSecondsByBall = new Map<string, number>();
   const lastMovingProgressByBall = new Map<string, number>();
@@ -240,6 +246,9 @@ export function createLiveRace(config: RaceConfig): LiveRaceSimulation {
 
   for (const ball of balls) {
     safeStateByBall.set(ball.id, safeStateForProgress(track, 0.4, ball.radius));
+    safeHistoryByBall.set(ball.id, [
+      { ...safeStateForProgress(track, 0.4, ball.radius), time: 0 },
+    ]);
   }
 
   updateBallFrameStates(world, balls, track, displayProgressByBall, frameStateByBall, activePowerupsByBall, 0);
@@ -301,6 +310,7 @@ export function createLiveRace(config: RaceConfig): LiveRaceSimulation {
           finishedIds,
           noContactSecondsByBall,
           safeStateByBall,
+          safeHistoryByBall,
           pendingRespawnsByBall,
           track,
           frameStateByBall,
@@ -407,8 +417,8 @@ function createWorld(): RAPIER.World {
   const world = new RAPIER.World({ x: 0, y: GRAVITY_Y, z: 0 });
 
   world.timestep = FIXED_TIMESTEP / PHYSICS_SUBSTEPS;
-  world.numSolverIterations = 16;
-  world.integrationParameters.numInternalPgsIterations = 5;
+  world.numSolverIterations = 12;
+  world.integrationParameters.numInternalPgsIterations = 4;
   world.integrationParameters.normalizedAllowedLinearError = 0.0004;
 
   return world;
@@ -454,7 +464,7 @@ function createRoadSafetySlabs(
   samples: TrackDefinition["samples"],
   gaps: Array<{ startDistance: number; endDistance: number }> = [],
 ): void {
-  const step = 3;
+  const step = 5;
 
   for (let index = 0; index < samples.length - step; index += step) {
     const sample = samples[index];
@@ -1605,15 +1615,16 @@ function addActivePowerup(
     const sourceActive = (activePowerupsByBall.get(ball.id) ?? []).filter(
       (powerup) => powerup.endsAt > time && powerup.kind !== "slow-source",
     );
-    sourceActive.push({ kind: "slow-source", endsAt: time + POWERUP_DURATION });
+    sourceActive.push({ kind: "slow-source", endsAt: time + SLOW_POWERUP_DURATION });
     activePowerupsByBall.set(ball.id, sourceActive);
   }
 
   const targetBalls = kind === "slow" ? balls.filter((other) => other.id !== ball.id) : [ball];
+  const duration = kind === "slow" ? SLOW_POWERUP_DURATION : POWERUP_DURATION;
 
   for (const target of targetBalls) {
     const active = (activePowerupsByBall.get(target.id) ?? []).filter((powerup) => powerup.endsAt > time && powerup.kind !== kind);
-    active.push({ kind, endsAt: time + POWERUP_DURATION });
+    active.push({ kind, endsAt: time + duration });
     activePowerupsByBall.set(target.id, active);
 
     if (kind === "giant") {
@@ -1890,6 +1901,7 @@ function updateFallRespawns(
   finishedIds: Set<string>,
   noContactSecondsByBall: Map<string, number>,
   safeStateByBall: Map<string, SafeBallState>,
+  safeHistoryByBall: Map<string, SafeCheckpoint[]>,
   pendingRespawnsByBall: Map<string, PendingRespawn>,
   track: TrackDefinition,
   frameStateByBall: Map<string, BallFrameState>,
@@ -1917,6 +1929,8 @@ function updateFallRespawns(
         respawnBallAtSafeState(ball, pendingRespawn.safeState, track);
         pendingRespawnsByBall.delete(ball.id);
         noContactSecondsByBall.set(ball.id, 0);
+        safeStateByBall.set(ball.id, pendingRespawn.safeState);
+        recordSafeCheckpoint(safeHistoryByBall, ball.id, pendingRespawn.safeState, time);
       }
 
       continue;
@@ -1935,7 +1949,7 @@ function updateFallRespawns(
         airborneSecondsBeforeContact,
       )
     ) {
-      queueBallRespawn(ball, safeStateByBall, pendingRespawnsByBall, track, time);
+      queueBallRespawn(ball, safeStateByBall, safeHistoryByBall, pendingRespawnsByBall, track, time);
       noContactSecondsByBall.set(ball.id, 0);
       continue;
     }
@@ -1964,6 +1978,7 @@ function updateFallRespawns(
 
         if (isSafeCheckpointProgressUpdate(nextSafeState, previousSafeState)) {
           safeStateByBall.set(ball.id, nextSafeState);
+          recordSafeCheckpoint(safeHistoryByBall, ball.id, nextSafeState, time);
         }
       }
     } else {
@@ -1974,7 +1989,7 @@ function updateFallRespawns(
     const hardFallen = position.y < HARD_FALL_Y;
 
     if (hardFallen) {
-      queueBallRespawn(ball, safeStateByBall, pendingRespawnsByBall, track, time);
+      queueBallRespawn(ball, safeStateByBall, safeHistoryByBall, pendingRespawnsByBall, track, time);
       continue;
     }
 
@@ -1983,7 +1998,7 @@ function updateFallRespawns(
     }
 
     if (isClearlyFallingOffCourse(track, position, frameState)) {
-      queueBallRespawn(ball, safeStateByBall, pendingRespawnsByBall, track, time);
+      queueBallRespawn(ball, safeStateByBall, safeHistoryByBall, pendingRespawnsByBall, track, time);
     }
   }
 }
@@ -2025,7 +2040,7 @@ function isIllegalShortcutLanding(
   trackStatus: ReturnType<typeof trackDistanceForPosition>,
   airborneSeconds: number,
 ): boolean {
-  if (!safeState || frameState.isRaceProgressCredible || !trackStatus.onCourse) {
+  if (!safeState || !trackStatus.onCourse) {
     return false;
   }
 
@@ -2050,6 +2065,7 @@ function isIllegalShortcutLanding(
 function queueBallRespawn(
   ball: SimBall,
   safeStateByBall: Map<string, SafeBallState>,
+  safeHistoryByBall: Map<string, SafeCheckpoint[]>,
   pendingRespawnsByBall: Map<string, PendingRespawn>,
   track: TrackDefinition,
   time: number,
@@ -2060,8 +2076,61 @@ function queueBallRespawn(
 
   pendingRespawnsByBall.set(ball.id, {
     respawnAt: time + FALL_RESPAWN_DELAY_SECONDS,
-    safeState: safeStateByBall.get(ball.id) ?? safeStateForProgress(track, 0.4, ball.radius),
+    safeState:
+      rewindSafeState(safeHistoryByBall.get(ball.id), time) ??
+      safeStateByBall.get(ball.id) ??
+      safeStateForProgress(track, 0.4, ball.radius),
   });
+}
+
+function recordSafeCheckpoint(
+  safeHistoryByBall: Map<string, SafeCheckpoint[]>,
+  ballId: string,
+  safeState: SafeBallState,
+  time: number,
+): void {
+  const history = safeHistoryByBall.get(ballId) ?? [];
+  const previous = history[history.length - 1];
+
+  if (previous && Math.abs(previous.progress - safeState.progress) < 0.45) {
+    previous.time = time;
+  } else {
+    history.push({ ...safeState, time });
+  }
+
+  const cutoff = time - SAFE_HISTORY_RETENTION_SECONDS;
+  while (history.length > 1 && history[1].time < cutoff) {
+    history.shift();
+  }
+
+  safeHistoryByBall.set(ballId, history);
+}
+
+function rewindSafeState(
+  history: SafeCheckpoint[] | undefined,
+  time: number,
+): SafeBallState | undefined {
+  if (!history || history.length === 0) {
+    return undefined;
+  }
+
+  const targetTime = time - FALL_REWIND_SECONDS;
+  let checkpoint = history[0];
+
+  for (const candidate of history) {
+    if (candidate.time > targetTime) {
+      break;
+    }
+
+    checkpoint = candidate;
+  }
+
+  return {
+    position: { ...checkpoint.position },
+    progress: checkpoint.progress,
+    yaw: checkpoint.yaw,
+    tangent: { ...checkpoint.tangent },
+  };
 }
 
 function safeStateForProgress(track: TrackDefinition, progress: number, radius: number): SafeBallState {
@@ -2117,54 +2186,7 @@ function nearestRaceRouteSample(
   track: TrackDefinition,
   position: { x: number; y: number; z: number },
 ): TrackDefinition["samples"][number] {
-  let closest = track.samples[0];
-  let closestScore = Number.POSITIVE_INFINITY;
-
-  for (const sample of raceRouteSamples(track)) {
-    const dx = sample.x - position.x;
-    const dz = sample.z - position.z;
-    const dy = sample.y - position.y;
-    const score = dx * dx + dz * dz + dy * dy * 0.38;
-
-    if (score < closestScore) {
-      closest = sample;
-      closestScore = score;
-    }
-  }
-
-  return closest;
-}
-
-function raceRouteSamples(track: TrackDefinition): TrackDefinition["samples"] {
-  const cached = routeSamplesByTrack.get(track);
-
-  if (cached) {
-    return cached;
-  }
-
-  const routeSamples: TrackDefinition["samples"][] = [track.samples];
-
-  if (track.splitSurfaces.length > 0) {
-    for (const surface of track.splitSurfaces) {
-      const leftLane = splitSurfaceLaneSamples(surface, -1);
-      const rightLane = splitSurfaceLaneSamples(surface, 1);
-
-      if (leftLane.length >= 2) {
-        routeSamples.push(leftLane);
-      }
-
-      if (rightLane.length >= 2) {
-        routeSamples.push(rightLane);
-      }
-    }
-  } else {
-    routeSamples.push(...track.branches.map((branch) => branch.samples));
-  }
-
-  const samples = routeSamples.flat();
-  routeSamplesByTrack.set(track, samples);
-
-  return samples;
+  return trackDistanceForPosition(track, position).sample;
 }
 
 function respawnBallAtSafeState(
@@ -2610,7 +2632,7 @@ function createMarbles(
       .setCcdEnabled(true)
       .setLinearDamping(BALL_LINEAR_DAMPING)
       .setAngularDamping(BALL_ANGULAR_DAMPING)
-      .setAdditionalSolverIterations(8);
+      .setAdditionalSolverIterations(6);
 
     const body = world.createRigidBody(bodyDesc);
     const densityScale = (DEFAULT_BALL_RADIUS / layout.radius) ** 3;
@@ -2938,5 +2960,3 @@ function smoothstep(edge0: number, edge1: number, value: number): number {
 function interactionGroups(memberships: number, filters: number): number {
   return ((memberships & 0xffff) << 16) | (filters & 0xffff);
 }
-
-

@@ -17,6 +17,7 @@ export type RaceStanding = {
   progressPercent: number;
   status: "racing" | "finished" | "disqualified";
   statusText?: string;
+  focused?: boolean;
 };
 
 export type SavedSetupSummary = {
@@ -31,6 +32,7 @@ type RenderState = ControlsState & {
   savedSetups: SavedSetupSummary[];
   selectedSetupId: string;
   setupName: string;
+  focusedBallId: string;
 };
 
 type ControlsCallbacks = {
@@ -41,6 +43,8 @@ type ControlsCallbacks = {
   onNewObstacleSeed: () => void;
   onSaveConfig: (name: string) => void;
   onLoadConfig: (id: string) => void;
+  onFocusBall: (ballId: string) => void;
+  onClearFocus: () => void;
 };
 
 const COLORS = ["#e84c4f", "#4094f7", "#38b36b", "#f2b84b", "#a35df2", "#f07ca6", "#25b6b1", "#f27d42"];
@@ -60,6 +64,7 @@ export class ControlsUi {
     savedSetups: [],
     selectedSetupId: "",
     setupName: "",
+    focusedBallId: "",
   };
 
   constructor(root: HTMLElement, callbacks: ControlsCallbacks) {
@@ -67,6 +72,7 @@ export class ControlsUi {
     this.callbacks = callbacks;
     this.root.addEventListener("input", (event) => this.handleInput(event));
     this.root.addEventListener("change", (event) => this.handleInput(event));
+    this.root.addEventListener("pointerdown", (event) => this.handlePointerDown(event));
     this.root.addEventListener("click", (event) => this.handleClick(event));
   }
 
@@ -126,8 +132,9 @@ export class ControlsUi {
 
       <section class="race-results" aria-live="polite">
         <div class="section-title">
-          <h2>Race Results</h2>
+          <h2>${this.state.focusedBallId ? "Focus Mode" : "Race Results"}</h2>
           <span class="results-state">${this.resultsStateLabel()}</span>
+          ${this.state.focusedBallId ? `<button class="focus-exit" type="button" data-action="clear-focus">Exit Focus</button>` : ""}
         </div>
         <div class="results-list" data-race-results>
           ${this.raceResultsHtml()}
@@ -172,18 +179,31 @@ export class ControlsUi {
     this.callbacks.onStateChange(this.getState());
   }
 
-  setRuntimeState(partial: Partial<Pick<RenderState, "busy" | "playbackState">>): void {
+  setRuntimeState(partial: Partial<Pick<RenderState, "busy" | "playbackState" | "focusedBallId">>): void {
     this.state = {
       ...this.state,
       busy: partial.busy ?? this.state.busy,
       playbackState: partial.playbackState ?? this.state.playbackState,
+      focusedBallId: partial.focusedBallId ?? this.state.focusedBallId,
     };
 
     this.updateDerivedUi();
   }
 
+  setFocusMode(focusedBallId: string): void {
+    this.state.focusedBallId = focusedBallId;
+    this.state.standings = this.state.standings.map((standing) => ({
+      ...standing,
+      focused: Boolean(focusedBallId) && standing.id === focusedBallId,
+    }));
+    this.render(this.state);
+  }
+
   setRaceStandings(standings: RaceStanding[]): void {
-    this.state.standings = standings.map((standing) => ({ ...standing }));
+    this.state.standings = standings.map((standing) => ({
+      ...standing,
+      focused: Boolean(this.state.focusedBallId) && standing.id === this.state.focusedBallId,
+    }));
 
     const list = this.root.querySelector<HTMLElement>("[data-race-results]");
     const label = this.root.querySelector<HTMLElement>(".results-state");
@@ -359,13 +379,13 @@ export class ControlsUi {
       const status = standing.statusText ?? statusLabel(standing);
 
       return `
-        <div class="result-row ${standing.status}">
+        <button class="result-row ${standing.status} ${standing.focused ? "focused" : ""}" type="button" data-action="focus-ball" data-ball-id="${escapeHtml(standing.id)}">
           <span class="result-place">${escapeHtml(String(standing.place))}</span>
           <span class="result-swatch" style="background:${color}"></span>
           <span class="result-label">${escapeHtml(formatStandingLabel(standing))}</span>
           <span class="result-status">${escapeHtml(status)}</span>
           <span class="result-meter"><span style="width:${progress.toFixed(1)}%"></span></span>
-        </div>
+        </button>
       `;
     }).join("");
   }
@@ -409,6 +429,30 @@ export class ControlsUi {
     this.updateActionButtons();
     this.updateLoadingPanel();
     this.updateInputDisabledState();
+  }
+
+  private handlePointerDown(event: PointerEvent): void {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const target = event.target;
+
+    if (!(target instanceof Element)) {
+      return;
+    }
+
+    const actionTarget = target.closest<HTMLElement>('[data-action="focus-ball"]');
+
+    if (!actionTarget || !this.root.contains(actionTarget)) {
+      return;
+    }
+
+    const ballId = actionTarget.dataset.ballId;
+
+    if (ballId) {
+      this.callbacks.onFocusBall(ballId);
+    }
   }
 
   private handleInput(event: Event): void {
@@ -490,22 +534,27 @@ export class ControlsUi {
       return;
     }
 
-    const action = target.dataset.action;
+    const actionTarget = target.closest<HTMLElement>("[data-action]");
+    if (!actionTarget) {
+      return;
+    }
+
+    const action = actionTarget.dataset.action;
 
     if (action === "toggle-panel") {
       this.root.classList.toggle("collapsed");
       this.root.parentElement?.classList.toggle("controls-collapsed", this.root.classList.contains("collapsed"));
-      target.textContent = this.root.classList.contains("collapsed") ? "Show" : "Hide";
+      actionTarget.textContent = this.root.classList.contains("collapsed") ? "Show" : "Hide";
       return;
     }
 
-    if (action === "close-setup-modal" && target === event.target) {
+    if (action === "close-setup-modal" && actionTarget === event.target) {
       this.setupModalOpen = false;
       this.render(this.state);
       return;
     }
 
-    if (target.closest(".setup-modal") && action === "close-setup-modal") {
+    if (actionTarget?.closest(".setup-modal") && action === "close-setup-modal") {
       this.setupModalOpen = false;
       this.render(this.state);
       return;
@@ -532,7 +581,7 @@ export class ControlsUi {
     }
 
     if (action === "remove") {
-      const index = Number(target.dataset.index);
+      const index = Number(actionTarget.dataset.index);
       this.state.options.splice(index, 1);
 
       this.state.playbackState = "idle";
@@ -541,8 +590,8 @@ export class ControlsUi {
     }
 
     if (action === "weight-step") {
-      const index = Number(target.dataset.index);
-      const step = Number(target.dataset.step);
+      const index = Number(actionTarget.dataset.index);
+      const step = Number(actionTarget.dataset.step);
       const option = this.state.options[index];
 
       if (!option || this.state.busy) {
@@ -588,6 +637,17 @@ export class ControlsUi {
 
     if (action === "reset") {
       this.callbacks.onReset();
+    }
+
+    if (action === "focus-ball") {
+      const ballId = actionTarget.dataset.ballId;
+      if (ballId) {
+        this.callbacks.onFocusBall(ballId);
+      }
+    }
+
+    if (action === "clear-focus") {
+      this.callbacks.onClearFocus();
     }
   }
 }
@@ -715,9 +775,12 @@ function cloneState(state: RenderState): RenderState {
     savedSetups: state.savedSetups.map((setup) => ({ ...setup })),
     selectedSetupId: state.selectedSetupId,
     setupName: state.setupName,
+    focusedBallId: state.focusedBallId,
   };
 }
 
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+
+

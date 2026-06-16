@@ -51,6 +51,7 @@ export class LiveRenderer {
   private currentFollowTarget = new Vector3();
   private hasLiveFollowTarget = false;
   private followedBallId = "";
+  private manualFollowBallId = "";
   private liveTick: LiveTickCallback | null = null;
   private readonly labelWorldPosition = new Vector3();
   private readonly labelScreenPosition = new Vector3();
@@ -94,6 +95,18 @@ export class LiveRenderer {
     this.liveTick = callback;
   }
 
+  setFocusedBall(ballId: string): void {
+    this.manualFollowBallId = ballId;
+    this.followedBallId = ballId;
+    this.hasLiveFollowTarget = false;
+  }
+
+  clearFocusedBall(): void {
+    this.manualFollowBallId = "";
+    this.followedBallId = "";
+    this.hasLiveFollowTarget = false;
+  }
+
   loadTrackOptions(
     options: Array<PickerOption | RaceBall>,
     track: TrackDefinition,
@@ -108,6 +121,7 @@ export class LiveRenderer {
     this.lastDestroyedObstacleKey = "";
     this.hasLiveFollowTarget = false;
     this.followedBallId = "";
+    this.manualFollowBallId = "";
     this.options = options.map((option) => ({ ...option }));
     this.clearRaceGroup();
 
@@ -226,6 +240,7 @@ export class LiveRenderer {
     let leaderId = "";
     let followedPosition: Vector3 | null = null;
     let followedProgress = Number.NEGATIVE_INFINITY;
+    let manualPosition: Vector3 | null = null;
 
     for (const ball of frame.balls) {
       const marble = this.marbles.get(ball.id);
@@ -268,17 +283,29 @@ export class LiveRenderer {
         followedProgress = progress;
         followedPosition = marble.group.position;
       }
+
+      if (ball.id === this.manualFollowBallId) {
+        manualPosition = marble.group.position;
+      }
     }
 
-    if (leaderPosition) {
+    if (manualPosition || leaderPosition) {
       const shouldSwitchLeader =
-        !followedPosition ||
-        !this.followedBallId ||
-        leaderProgress > followedProgress + LEADER_SWITCH_PROGRESS_MARGIN;
+        !this.manualFollowBallId &&
+        Boolean(leaderPosition) &&
+        (!followedPosition ||
+          !this.followedBallId ||
+          leaderProgress > followedProgress + LEADER_SWITCH_PROGRESS_MARGIN);
 
-      const target = shouldSwitchLeader || !followedPosition ? leaderPosition : followedPosition;
+      const target = manualPosition ?? (shouldSwitchLeader || !followedPosition ? leaderPosition : followedPosition);
 
-      if (shouldSwitchLeader) {
+      if (!target) {
+        return;
+      }
+
+      if (manualPosition) {
+        this.followedBallId = this.manualFollowBallId;
+      } else if (shouldSwitchLeader) {
         this.followedBallId = leaderId;
       }
 
@@ -359,6 +386,7 @@ export class LiveRenderer {
     this.currentFollowTarget.copy(frame.target);
     this.hasLiveFollowTarget = false;
     this.followedBallId = "";
+    this.manualFollowBallId = "";
     this.controls.update();
   }
 
@@ -396,6 +424,7 @@ export class LiveRenderer {
     this.currentFollowTarget.copy(frame.target);
     this.hasLiveFollowTarget = false;
     this.followedBallId = "";
+    this.manualFollowBallId = "";
     this.controls.update();
   }
 

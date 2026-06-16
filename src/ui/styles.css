@@ -356,10 +356,25 @@ small {
   grid-template-rows: auto 4px;
   gap: 5px 8px;
   align-items: center;
+  width: 100%;
   padding: 8px 9px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 7px;
   background: rgba(255, 255, 255, 0.04);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.result-row:hover {
+  border-color: rgba(64, 148, 247, 0.42);
+  background: rgba(64, 148, 247, 0.08);
+}
+
+.result-row.focused {
+  border-color: rgba(64, 148, 247, 0.8);
+  box-shadow: 0 0 0 1px rgba(64, 148, 247, 0.28);
 }
 
 .result-row.finished {
@@ -428,6 +443,13 @@ small {
 
 .result-row.disqualified .result-meter span {
   background: #e84c4f;
+}
+
+.focus-exit {
+  padding: 5px 8px;
+  border-color: rgba(64, 148, 247, 0.45);
+  color: #dcecff;
+  font-size: 11px;
 }
 
 .simulation-progress {
